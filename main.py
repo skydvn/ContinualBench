@@ -442,18 +442,20 @@ def extend_args(args, dataset):
         # set logging level to debug
         args.nowand = 1
 
-    if args.wandb_entity is None:
-        args.wandb_entity = os.getenv('WANDB_ENTITY', None)
-    if args.wandb_project is None:
-        args.wandb_project = os.getenv('WANDB_PROJECT', None)
+    if args.wandb_on:
+        if args.wandb_entity is None:
+            args.wandb_entity = os.getenv('WANDB_ENTITY', None)
+        if args.wandb_project is None:
+            args.wandb_project = os.getenv('WANDB_PROJECT', None)
 
-    if args.wandb_entity is None or args.wandb_project is None:
-        logging.info('`wandb_entity` and `wandb_project` not set. Disabling wandb.')
-        args.nowand = 1
+        if args.wandb_entity is None or args.wandb_project is None:
+            logging.info('`wandb_entity` and `wandb_project` not set. Disabling wandb.')
+            args.nowand = 1
+        else:
+            logging.info(f'Logging to wandb: {args.wandb_entity}/{args.wandb_project}')
+            args.nowand = 0
     else:
-        logging.info(f'Logging to wandb: {args.wandb_entity}/{args.wandb_project}')
         args.nowand = 0
-
 
 def initialize(
     args=None,

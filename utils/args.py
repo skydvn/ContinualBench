@@ -404,6 +404,8 @@ def add_management_args(parser: ArgumentParser) -> None:
 
     wandb_group = parser.add_argument_group('Wandb arguments', 'Arguments to manage logging on Wandb.')
 
+    wandb_group.add_argument('--wandb_on', type=bool, default=False,
+                             help='Trigger to turn on WanDB or not.')
     wandb_group.add_argument('--wandb_name', type=str, default=None,
                              help='Wandb name for this run. Overrides the default name (`args.model`).')
     wandb_group.add_argument('--wandb_entity', type=str,

@@ -41,6 +41,7 @@ def initialize_wandb(args: Namespace) -> None:
         args: the arguments of the current execution
     """
     assert wandb is not None, "Wandb not installed, please install it or run without wandb"
+
     run_name = args.wandb_name if args.wandb_name is not None else args.model
 
     run_id = args.conf_jobnum.split('-')[0]
