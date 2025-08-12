@@ -129,8 +129,13 @@ class ProtoDC(ContinualModel):
                 true_class_idx = class_keys.index(k)
                 d_true = distances[true_class_idx]  # d(f_φ(x), c_k)
 
-                # Compute log-sum-exp: log(∑_{k'} exp(-d(f_φ(x), c_k')))
-                log_sum_exp = torch.logsumexp(-distances, dim=0)
+                # Compute log-sum-exp: log(∑_{k'} exp(-d(f_φ(x), c_k'))) where k' ≠ k
+                # Exclude the true class distance from the sum
+                distances_excluding_true = torch.cat([
+                    distances[:true_class_idx],
+                    distances[true_class_idx + 1:]
+                ])
+                log_sum_exp = torch.logsumexp(-distances_excluding_true, dim=0)
 
                 # Compute loss for this sample: d(f_φ(x), c_k) + log(∑_{k'} exp(-d(f_φ(x), c_k')))
                 sample_loss = d_true + log_sum_exp
@@ -143,6 +148,81 @@ class ProtoDC(ContinualModel):
             return normalized_loss
         else:
             return torch.tensor(0.0, device=device)
+
+    # Alternative vectorized implementation for better efficiency
+    def compute_prototype_loss_vectorized(self, features, labels):
+        """
+        Vectorized version of prototypical network loss computation.
+        More efficient for larger batches.
+        """
+        device = features.device
+        unique_labels = torch.unique(labels)
+        N_C = len(unique_labels)
+
+        if N_C == 0:
+            return torch.tensor(0.0, device=device)
+
+        # Compute prototypes for each class
+        prototypes = []
+        prototype_labels = []
+
+        for label in unique_labels:
+            class_mask = (labels == label)
+            class_features = features[class_mask]
+
+            if len(class_features) > 0:
+                prototype = class_features.mean(dim=0)
+                prototypes.append(prototype)
+                prototype_labels.append(label)
+
+                # Update stored prototypes
+                self.class_prototypes[label.item()] = prototype.detach()
+                self.seen_classes.add(label.item())
+
+        if len(prototypes) == 0:
+            return torch.tensor(0.0, device=device)
+
+        # Stack prototypes: (num_classes, feature_dim)
+        prototypes = torch.stack(prototypes)
+        prototype_labels = torch.tensor(prototype_labels, device=device)
+
+        # Compute pairwise squared distances: (batch_size, num_classes)
+        # ||f_φ(x) - c_k||²
+        distances = torch.cdist(features.unsqueeze(1), prototypes.unsqueeze(0)).squeeze(1) ** 2
+
+        # For each sample, find the index of its true class prototype
+        true_class_indices = []
+        for i, label in enumerate(labels):
+            try:
+                idx = (prototype_labels == label).nonzero(as_tuple=True)[0][0]
+                true_class_indices.append(idx)
+            except IndexError:
+                # Handle case where prototype for this label doesn't exist
+                true_class_indices.append(0)  # Default to first prototype
+
+        true_class_indices = torch.tensor(true_class_indices, device=device)
+
+        # Get distances to true class prototypes: d(f_φ(x), c_k)
+        true_distances = distances[torch.arange(len(labels)), true_class_indices]
+
+        # Compute log-sum-exp over all prototypes EXCEPT true class: log(∑_{k'≠k} exp(-d(f_φ(x), c_k')))
+        # Create mask to exclude true class distances
+        batch_indices = torch.arange(len(labels), device=device)
+
+        # Set true class distances to -inf so they don't contribute to logsumexp
+        masked_distances = distances.clone()
+        masked_distances[batch_indices, true_class_indices] = float('-inf')
+
+        log_sum_exp = torch.logsumexp(-masked_distances, dim=1)
+
+        # Compute loss for each sample: d(f_φ(x), c_k) + log(∑_{k'} exp(-d(f_φ(x), c_k')))
+        sample_losses = true_distances + log_sum_exp
+
+        # Average over all samples: 1/(N_C × N_Q)
+        N_Q = len(labels)
+        normalized_loss = sample_losses.mean() / N_C
+
+        return normalized_loss
 
     def generate_synthetic_prototypes(self, current_labels):
         """Generate synthetic prototypical data for condensation."""
