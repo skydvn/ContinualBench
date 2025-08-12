@@ -3,8 +3,11 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torch import nn
-from torch.nn import functional as F
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.optim import SGD, Adam
+from argparse import ArgumentParser
 
 from models.utils.continual_model import ContinualModel
 from utils.args import add_rehearsal_args, ArgumentParser
@@ -25,7 +28,7 @@ class ProtoDC(ContinualModel):
                             help='Penalty weight for prototype alignment loss.')
         parser.add_argument('--lr_img', type=float, default=0.1,
                             help='Learning rate for synthetic images.')
-        parser.add_argument('--proto_steps', type=int, default=10,
+        parser.add_argument('--proto_steps', type=int, default=200,
                             help='Number of steps for prototype optimization.')
         parser.add_argument('--proto_temp', type=float, default=0.1,
                             help='Temperature for prototype similarity.')
@@ -44,7 +47,8 @@ class ProtoDC(ContinualModel):
         self.channel, self.im_size = self.input_shape[0], self.input_shape[1:]
 
         # Initialize prototypes storage
-        self.class_prototypes = {}
+        self.class_prototypes = {}      # This is stored every round and reset in the next round
+        self.class_exemplars = {}
         self.seen_classes = set()
 
     def extract_features(self, x):
@@ -175,8 +179,8 @@ class ProtoDC(ContinualModel):
                 prototypes.append(prototype)
                 prototype_labels.append(label)
 
-                # Update stored prototypes
-                self.class_prototypes[label.item()] = prototype.detach()
+                # Update stored prototypes for future use
+                self.class_prototypes[label.item()] = prototypes[label.item()].detach()
                 self.seen_classes.add(label.item())
 
         if len(prototypes) == 0:
@@ -224,7 +228,7 @@ class ProtoDC(ContinualModel):
 
         return normalized_loss
 
-    def generate_synthetic_prototypes(self, current_labels):
+    def generate_synthetic_prototypes(self):
         """Generate synthetic prototypical data for condensation."""
         device = next(self.net.parameters()).device
 
@@ -244,78 +248,160 @@ class ProtoDC(ContinualModel):
 
         return image_syn, label_syn
 
-    def optimize_prototypes(self, image_syn, label_syn, target_features):
-        """Optimize synthetic prototypes to match target features."""
+    def optimize_proto_exemplar(self, image_syn, label_syn, target_features=None):
+        """
+        Optimize synthetic prototypes to match target features.
+
+        This function optimizes each synthetic exemplar image_syn[i] to produce features
+        that match the stored prototype for class i.
+
+        Args:
+            image_syn: List of synthetic images [image_syn[0], image_syn[1], ..., image_syn[num_classes-1]]
+                       where image_syn[i] is the synthetic exemplar for class i
+            label_syn: List of labels [0, 1, 2, ..., num_classes-1]
+            target_features: Optional target features (not used in this implementation)
+        """
         if not image_syn:
             return
 
-        # Optimizer for synthetic images
-        optimizer_img = SGD([{'params': img, 'lr': self.args.lr_img} for img in image_syn],
-                            momentum=0.5)
-
         criterion_proto_align = nn.MSELoss()
+        total_loss = 0
+        count = 0
+        # Optimize each synthetic exemplar individually
+        for i, (syn_img, syn_label) in enumerate(zip(image_syn, label_syn)):
+            class_id = syn_label.item()
 
-        for step in range(self.proto_steps):
-            optimizer_img.zero_grad()
-            total_align_loss = 0
+            # Skip if we haven't seen this class yet (no prototype to align to)
+            if class_id not in self.class_prototypes:
+                continue
 
-            for i, (syn_img, syn_label) in enumerate(zip(image_syn, label_syn)):
-                # Get features from synthetic image
+            # Create optimizer for this specific synthetic image
+            optimizer_img = SGD([syn_img], lr=self.args.lr_img, momentum=0.5)
+            target_proto = self.class_prototypes[class_id]
+
+            # Optimize this synthetic exemplar over multiple steps
+            for step in range(self.proto_steps):
+                optimizer_img.zero_grad()
+                count += 1
+
+                # Forward pass: get features from synthetic image
+                # syn_img has shape (1, C, H, W) - single exemplar image
                 syn_features = self.extract_features(syn_img)
 
-                # Get target prototype for this class
-                class_id = syn_label.item()
-                if class_id in self.class_prototypes:
-                    target_proto = self.class_prototypes[class_id]
 
-                    # Align synthetic features with target prototype
-                    align_loss = criterion_proto_align(syn_features.mean(dim=0), target_proto)
-                    total_align_loss += align_loss
+                # syn_features has shape (1, feature_dim) - features from the single exemplar
+                # The exemplar itself IS the prototype, so we squeeze the batch dimension
+                syn_proto = syn_features.squeeze(0)  # Remove batch dimension: (feature_dim,)
 
-            if total_align_loss > 0:
-                total_align_loss.backward()
+                # Ensure target prototype has same shape
+                if target_proto.dim() != syn_proto.dim():
+                    if target_proto.dim() > 1:
+                        target_proto = target_proto.view(-1)
+                    if syn_proto.dim() > 1:
+                        syn_proto = syn_proto.view(-1)
+
+                # Align synthetic prototype with stored target prototype
+                align_loss = criterion_proto_align(syn_proto, target_proto)
+                total_loss += align_loss.item()
+
+                # Backward pass and optimization step
+                align_loss.backward()
                 optimizer_img.step()
 
-    def compute_buffer_alignment_loss(self, current_features, current_labels):
-        """Compute alignment loss between current and buffered prototypes."""
-        if self.buffer.is_empty():
-            return torch.tensor(0.0).to(current_features.device)
+                # Optional: Add some constraints to keep synthetic images realistic
+                with torch.no_grad():
+                    # Clamp pixel values to reasonable range (e.g., [0, 1] or [-1, 1])
+                    syn_img.clamp_(-2.0, 2.0)  # Adjust range based on your data normalization
 
-        # Get buffered data
+        print(f"average proto loss: {total_loss / count}")
+
+        # Update buffer with optimized synthetic exemplars
+        self._add_synthetic_to_buffer(image_syn, label_syn)
+
+    def _add_synthetic_to_buffer(self, image_syn, label_syn):
+        """
+        Add optimized synthetic exemplars to the buffer.
+
+        Args:
+            image_syn: List of optimized synthetic images
+            label_syn: Corresponding labels
+        """
+        with torch.no_grad():
+            for syn_img, syn_label in zip(image_syn, label_syn):
+                class_id = syn_label.item()
+
+                # Only add to buffer if we have a prototype for this class
+                if class_id in self.class_prototypes:
+                    # Get logits for the synthetic exemplar
+                    syn_outputs = self.net(syn_img)
+
+                    # Add synthetic exemplar to buffer
+                    self.buffer.add_data(
+                        examples=syn_img.detach(),
+                        labels=syn_label,
+                        logits=syn_outputs.detach()
+                    )
+
+    def compute_buffer_alignment_loss(self, current_features, current_labels):
+        """
+        Compute alignment loss between current and buffered prototypes.
+
+        Assumes buf_inputs are already unique exemplars - each buf_inputs[i]
+        corresponds to a unique class in buf_labels[i].
+
+        Args:
+            current_features: Features from current batch, shape (batch_size, feature_dim)
+            current_labels: Labels from current batch, shape (batch_size,)
+
+        Returns:
+            Alignment loss (scalar tensor)
+        """
+        if self.buffer.is_empty():
+            return torch.tensor(0.0, device=current_features.device)
+
+        # Get buffered unique exemplars
         buf_inputs, buf_labels, buf_logits = self.buffer.get_data(
             min(self.args.minibatch_size, len(self.buffer)),
             transform=self.transform,
             device=self.device
         )
 
-        # Extract features from buffered data
+        # Extract features from buffered unique exemplars
         buf_features = self.extract_features(buf_inputs)
 
         criterion_proto_align = nn.MSELoss()
         align_loss = 0
         count = 0
 
-        # Align prototypes of common classes
+        # Find classes that appear in both current batch and buffer
         current_unique = torch.unique(current_labels)
-        buf_unique = torch.unique(buf_labels)
+        buf_unique = torch.unique(buf_labels)  # Should be same as buf_labels since each is unique
         common_classes = set(current_unique.cpu().numpy()) & set(buf_unique.cpu().numpy())
 
         for class_id in common_classes:
-            # Current class prototype
+            # Current class prototype (average of current samples for this class)
             current_mask = (current_labels == class_id)
             if current_mask.sum() > 0:
                 current_proto = current_features[current_mask].mean(dim=0)
 
-                # Buffered class prototype
+                # Buffered class prototype (from single unique exemplar)
                 buf_mask = (buf_labels == class_id)
-                if buf_mask.sum() > 0:
-                    buf_proto = buf_features[buf_mask].mean(dim=0)
+                buf_idx = torch.where(buf_mask)[0]
 
-                    # Alignment loss
+                if len(buf_idx) > 0:
+                    # Since buf_inputs are unique exemplars, take the single exemplar's features
+                    buf_proto = buf_features[buf_idx[0]]  # Single exemplar feature
+
+                    # Ensure prototypes have same shape
+                    if current_proto.shape != buf_proto.shape:
+                        current_proto = current_proto.view(-1)
+                        buf_proto = buf_proto.view(-1)
+
+                    # Alignment loss between current prototype and buffered exemplar
                     align_loss += criterion_proto_align(current_proto, buf_proto)
                     count += 1
 
-        return align_loss / count if count > 0 else torch.tensor(0.0).to(current_features.device)
+        return align_loss / count if count > 0 else torch.tensor(0.0, device=current_features.device)
 
     def observe(self, inputs, labels, not_aug_inputs, epoch=None):
         """Main training step with prototype condensation."""
@@ -324,8 +410,7 @@ class ProtoDC(ContinualModel):
         self.opt.zero_grad()
 
         # Forward pass
-        outputs = self.net(inputs)
-        features = self.extract_features(inputs)
+        outputs, features = self.net(inputs, returnt = 'both')
 
         # Vanilla Loss (standard classification)
         vanilla_loss = self.loss(outputs, labels)
@@ -342,62 +427,20 @@ class ProtoDC(ContinualModel):
             loss_pa = self.args.beta * self.compute_buffer_alignment_loss(features, labels)
             loss += loss_pa
 
-            # Generate and optimize synthetic prototypes for condensation
-            image_syn, label_syn = self.generate_synthetic_prototypes(labels)
-            if image_syn:  # Only if we have synthetic prototypes
-                self.optimize_prototypes(image_syn, label_syn, features)
-
         # Backward pass and optimization
         loss.backward()
         self.opt.step()
 
-        # Add prototypical exemplars to buffer
-        # Store examples with their features/logits for future prototype alignment
-        with torch.no_grad():
-            # Select representative examples (could be improved with more sophisticated selection)
-            if len(not_aug_inputs) > 0:
-                self.buffer.add_data(
-                    examples=not_aug_inputs,
-                    labels=labels,
-                    logits=outputs.data
-                )
+        # Generate and optimize synthetic prototypes for condensation
+        # FIXME As this observe is set in the loop over dataset,
+        # FIXME the buffer should only save 1 data according to each class.
+        image_syn, label_syn = self.generate_synthetic_prototypes()
+        if image_syn:  # Only if we have synthetic prototypes
+            self.optimize_proto_exemplar(image_syn, label_syn, features)
+
 
         return loss.item()
 
     def forward(self, x):
         """Forward pass through the network."""
         return self.net(x)
-
-    def get_prototype_similarity(self, features, class_id):
-        """Get similarity to stored prototype for a specific class."""
-        if class_id not in self.class_prototypes:
-            return torch.tensor(0.0)
-
-        prototype = self.class_prototypes[class_id]
-        similarity = F.cosine_similarity(features, prototype.unsqueeze(0), dim=1)
-        return similarity.mean()
-
-    def update_prototypes(self, features, labels):
-        """Update class prototypes with new data using moving average."""
-        unique_labels = torch.unique(labels)
-        momentum = 0.9  # Momentum for prototype updates
-
-        for label in unique_labels:
-            class_mask = (labels == label)
-            class_features = features[class_mask]
-
-            if len(class_features) > 0:
-                new_prototype = class_features.mean(dim=0).detach()
-                label_item = label.item()
-
-                if label_item in self.class_prototypes:
-                    # Update existing prototype with momentum
-                    self.class_prototypes[label_item] = (
-                            momentum * self.class_prototypes[label_item] +
-                            (1 - momentum) * new_prototype
-                    )
-                else:
-                    # Initialize new prototype
-                    self.class_prototypes[label_item] = new_prototype
-
-                self.seen_classes.add(label_item)

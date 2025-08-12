@@ -148,6 +148,7 @@ def train(model: ContinualModel, dataset: ContinualDataset,
     can_compute_fwd_beforetask = True
     random_results_class, random_results_task = [], []
 
+    args.nowand = True
     if not args.nowand:
         initialize_wandb(args)
 

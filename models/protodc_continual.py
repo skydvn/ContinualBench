@@ -75,3 +75,38 @@ class ProtoDC(ContinualModel):
                              logits=outputs.data)
 
         return loss.item()
+
+    def optimize_proto_exemplar(self, image_syn, label_syn, target_features):
+        """ Optimize synthetic prototypes to match target features.
+
+
+        """
+        if not image_syn:
+            return
+
+        # Optimizer for synthetic images
+        for i, (syn_img, syn_label) in enumerate(zip(image_syn, label_syn)):
+            optimizer_img = SGD([{'params': syn_img, 'lr': self.args.lr_img}],
+                                momentum=0.5)
+
+            criterion_proto_align = nn.MSELoss()
+
+            for step in range(self.proto_steps):
+                optimizer_img.zero_grad()
+
+                # Get features from synthetic image
+                syn_proto = self.extract_features(syn_img)
+
+                # Get target prototype for this class
+                class_id = syn_label.item()
+                if class_id in self.class_prototypes:
+                    target_proto = self.class_prototypes[class_id]
+
+                    # Align synthetic features with target prototype
+                    align_loss = criterion_proto_align(syn_proto, target_proto)
+
+                    if align_loss > 0:
+                        align_loss.backward()
+                        optimizer_img.step()
+
+        # Add prototypical exemplars to buffer

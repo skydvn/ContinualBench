@@ -412,6 +412,8 @@ def add_management_args(parser: ArgumentParser) -> None:
                              default = 'vinuni-continual-learning', help='Wandb entity')
     wandb_group.add_argument('--wandb_project', type=str,
                              default = 'Memory CL', help='Wandb project name')
+    # wandb_group.add_argument('--wandb_project', type=str, help='Wandb project name')
+    # wandb_group.add_argument('--wandb_entity', type=str, help='Wandb entity')
 
 
 def add_rehearsal_args(parser: ArgumentParser) -> None:

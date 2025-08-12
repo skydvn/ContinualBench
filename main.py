@@ -440,9 +440,10 @@ def extend_args(args, dataset):
     if args.debug_mode:
         logging.warning('Debug mode enabled: running only a few forward steps per epoch with W&B disabled.')
         # set logging level to debug
-        args.nowand = 1
+        args.nowand = True
 
     if args.wandb_on:
+        print("=============== wandb on =============== ")
         if args.wandb_entity is None:
             args.wandb_entity = os.getenv('WANDB_ENTITY', None)
         if args.wandb_project is None:
@@ -450,11 +451,12 @@ def extend_args(args, dataset):
 
         if args.wandb_entity is None or args.wandb_project is None:
             logging.info('`wandb_entity` and `wandb_project` not set. Disabling wandb.')
-            args.nowand = 1
+            args.nowand = True
         else:
             logging.info(f'Logging to wandb: {args.wandb_entity}/{args.wandb_project}')
             args.nowand = 0
     else:
+        print("=============== wandb off =============== ")
         args.nowand = 0
 
 def initialize(

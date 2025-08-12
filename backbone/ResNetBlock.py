@@ -216,7 +216,7 @@ class ResNet(MammothBackbone):
         if returnt == 'out':
             return out
         elif returnt == 'both':
-            return (out, feature)
+            return out, feature
         elif returnt == 'full':
             return out, [
                 out_0 if not self.return_prerelu else out_0_t,
