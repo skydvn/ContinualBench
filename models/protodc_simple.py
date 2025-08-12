@@ -58,29 +58,91 @@ class ProtoDC(ContinualModel):
             return features
 
     def compute_prototype_loss(self, features, labels):
-        """Compute prototypical network loss."""
+        """
+        Compute prototypical network loss following the formula:
+
+        For k in {1, ..., N_C} do:
+            For (x, y) in Q_k do:
+                J ← J + (1/(N_C × N_Q)) × [d(f_φ(x), c_k) + log(∑_{k'} exp(-d(f_φ(x), c_k')))]
+
+        Args:
+            features: Feature representations f_φ(x) of shape (batch_size, feature_dim)
+            labels: Ground truth labels of shape (batch_size,)
+
+        Returns:
+            Prototypical network loss (scalar tensor)
+        """
+        device = features.device
         unique_labels = torch.unique(labels)
-        proto_loss = 0
+        N_C = len(unique_labels)  # Number of classes in current batch
+
+        if N_C == 0:
+            return torch.tensor(0.0, device=device)
+
+        # Step 1: Compute prototypes c_k for each class k
+        prototypes = {}
+        class_counts = {}
 
         for label in unique_labels:
-            # Get features for this class
             class_mask = (labels == label)
-            class_features = features[class_mask]
+            class_features = features[class_mask]  # All features for class k
 
             if len(class_features) > 0:
-                # Compute class prototype (centroid)
-                prototype = class_features.mean(dim=0)
+                # c_k = mean of all features for class k
+                prototypes[label.item()] = class_features.mean(dim=0)
+                class_counts[label.item()] = len(class_features)
 
-                # Store/update class prototype
-                self.class_prototypes[label.item()] = prototype.detach()
+                # Update stored prototypes for future use
+                self.class_prototypes[label.item()] = prototypes[label.item()].detach()
                 self.seen_classes.add(label.item())
 
-                # Compute distance to prototype
-                distances = torch.cdist(class_features.unsqueeze(0),
-                                        prototype.unsqueeze(0).unsqueeze(0))
-                proto_loss += distances.mean()
+        if len(prototypes) == 0:
+            return torch.tensor(0.0, device=device)
 
-        return proto_loss / len(unique_labels) if len(unique_labels) > 0 else torch.tensor(0.0).to(features.device)
+        # Step 2: Compute prototypical network loss
+        total_loss = 0.0
+        N_Q = 0  # Total number of query samples
+
+        # For each class k in {1, ..., N_C}
+        for k in prototypes.keys():
+            c_k = prototypes[k]  # Prototype for class k
+
+            # Get all query samples (x, y) in Q_k (where y = k)
+            query_mask = (labels == k)
+            query_features = features[query_mask]  # f_φ(x) for all x where y = k
+
+            # For each query sample (x, y) in Q_k
+            for query_feature in query_features:
+                # Compute distances d(f_φ(x), c_k') for all k'
+                distances = []
+
+                for k_prime in prototypes.keys():
+                    c_k_prime = prototypes[k_prime]
+                    # Squared Euclidean distance: d(f_φ(x), c_k')
+                    dist = torch.sum((query_feature - c_k_prime) ** 2)
+                    distances.append(dist)
+
+                distances = torch.stack(distances)  # Shape: (num_classes,)
+
+                # Find distance to correct prototype c_k
+                class_keys = list(prototypes.keys())
+                true_class_idx = class_keys.index(k)
+                d_true = distances[true_class_idx]  # d(f_φ(x), c_k)
+
+                # Compute log-sum-exp: log(∑_{k'} exp(-d(f_φ(x), c_k')))
+                log_sum_exp = torch.logsumexp(-distances, dim=0)
+
+                # Compute loss for this sample: d(f_φ(x), c_k) + log(∑_{k'} exp(-d(f_φ(x), c_k')))
+                sample_loss = d_true + log_sum_exp
+                total_loss += sample_loss
+                N_Q += 1
+
+        # Normalize by total number of samples: 1/(N_C × N_Q)
+        if N_Q > 0:
+            normalized_loss = total_loss / (N_C * N_Q)
+            return normalized_loss
+        else:
+            return torch.tensor(0.0, device=device)
 
     def generate_synthetic_prototypes(self, current_labels):
         """Generate synthetic prototypical data for condensation."""
