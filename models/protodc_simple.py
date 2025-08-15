@@ -11,7 +11,6 @@ from argparse import ArgumentParser
 
 from models.utils.continual_model import ContinualModel
 from utils.args import add_rehearsal_args, ArgumentParser
-from utils.buffer import Buffer
 
 
 class ProtoDC(ContinualModel):
@@ -37,7 +36,13 @@ class ProtoDC(ContinualModel):
     def __init__(self, backbone, loss, args, transform, dataset=None):
         super().__init__(backbone, loss, args, transform, dataset=dataset)
 
-        self.buffer = Buffer(self.args.buffer_size)
+
+        # Define Buffer
+        # FIXME This buffer has size equal to number of classes,
+        # FIXME When new prototypical exemplar according to one class is added, the last is replaced.
+        self.buf_labels = {}
+        self.buf_syn_img = {}
+
         self.proto_temp = args.proto_temp
         self.proto_steps = args.proto_steps
 
@@ -265,8 +270,6 @@ class ProtoDC(ContinualModel):
             return
 
         criterion_proto_align = nn.MSELoss()
-        total_loss = 0
-        count = 0
         # Optimize each synthetic exemplar individually
         for i, (syn_img, syn_label) in enumerate(zip(image_syn, label_syn)):
             class_id = syn_label.item()
@@ -282,12 +285,11 @@ class ProtoDC(ContinualModel):
             # Optimize this synthetic exemplar over multiple steps
             for step in range(self.proto_steps):
                 optimizer_img.zero_grad()
-                count += 1
+                total_loss = 0
 
                 # Forward pass: get features from synthetic image
                 # syn_img has shape (1, C, H, W) - single exemplar image
                 syn_features = self.extract_features(syn_img)
-
 
                 # syn_features has shape (1, feature_dim) - features from the single exemplar
                 # The exemplar itself IS the prototype, so we squeeze the batch dimension
@@ -302,10 +304,11 @@ class ProtoDC(ContinualModel):
 
                 # Align synthetic prototype with stored target prototype
                 align_loss = criterion_proto_align(syn_proto, target_proto)
-                total_loss += align_loss.item()
+                # keep_loss = criterion_proto_align(syn_proto, buff_proto)
+                total_loss = align_loss
 
                 # Backward pass and optimization step
-                align_loss.backward()
+                total_loss.backward()
                 optimizer_img.step()
 
                 # Optional: Add some constraints to keep synthetic images realistic
@@ -313,7 +316,7 @@ class ProtoDC(ContinualModel):
                     # Clamp pixel values to reasonable range (e.g., [0, 1] or [-1, 1])
                     syn_img.clamp_(-2.0, 2.0)  # Adjust range based on your data normalization
 
-        print(f"average proto loss: {total_loss / count}")
+        print(f"average proto loss: {total_loss.item()}")
 
         # Update buffer with optimized synthetic exemplars
         self._add_synthetic_to_buffer(image_syn, label_syn)
@@ -329,18 +332,11 @@ class ProtoDC(ContinualModel):
         with torch.no_grad():
             for syn_img, syn_label in zip(image_syn, label_syn):
                 class_id = syn_label.item()
+                # FIXME Add synthetic exemplar to buffer
+                # FIXME buffer size 1xCxHxW
+                self.buf_syn_img[class_id] = syn_img.to(self.device)
+                self.buf_labels[class_id] = syn_label.to(self.device)
 
-                # Only add to buffer if we have a prototype for this class
-                if class_id in self.class_prototypes:
-                    # Get logits for the synthetic exemplar
-                    syn_outputs = self.net(syn_img)
-
-                    # Add synthetic exemplar to buffer
-                    self.buffer.add_data(
-                        examples=syn_img.detach(),
-                        labels=syn_label,
-                        logits=syn_outputs.detach()
-                    )
 
     def compute_buffer_alignment_loss(self, current_features, current_labels):
         """
@@ -356,41 +352,28 @@ class ProtoDC(ContinualModel):
         Returns:
             Alignment loss (scalar tensor)
         """
-        if self.buffer.is_empty():
+        # Check if buffer has any data
+        if not hasattr(self, 'buf_labels') or len(self.buf_labels) == 0:
             return torch.tensor(0.0, device=current_features.device)
-
-        # Get buffered unique exemplars
-        buf_inputs, buf_labels, buf_logits = self.buffer.get_data(
-            min(self.args.minibatch_size, len(self.buffer)),
-            transform=self.transform,
-            device=self.device
-        )
-
-        # Extract features from buffered unique exemplars
-        buf_features = self.extract_features(buf_inputs)
 
         criterion_proto_align = nn.MSELoss()
         align_loss = 0
         count = 0
 
-        # Find classes that appear in both current batch and buffer
-        current_unique = torch.unique(current_labels)
-        buf_unique = torch.unique(buf_labels)  # Should be same as buf_labels since each is unique
-        common_classes = set(current_unique.cpu().numpy()) & set(buf_unique.cpu().numpy())
+        """
+            Args:
+            - self.buf_labels: dict {key: values}
+            - self.buf_syn_img: dict {key: values}
 
-        for class_id in common_classes:
+        """
+        for class_id in self.seen_classes:
             # Current class prototype (average of current samples for this class)
             current_mask = (current_labels == class_id)
             if current_mask.sum() > 0:
-                current_proto = current_features[current_mask].mean(dim=0)
+                current_proto = current_features[current_mask].mean(dim=0)  # 1xD
 
-                # Buffered class prototype (from single unique exemplar)
-                buf_mask = (buf_labels == class_id)
-                buf_idx = torch.where(buf_mask)[0]
-
-                if len(buf_idx) > 0:
-                    # Since buf_inputs are unique exemplars, take the single exemplar's features
-                    buf_proto = buf_features[buf_idx[0]]  # Single exemplar feature
+                if not self.buf_syn_img[class_id] is None:
+                    _ , buf_proto = self.net(self.buf_syn_img[class_id], returnt='both') # Single exemplar feature
 
                     # Ensure prototypes have same shape
                     if current_proto.shape != buf_proto.shape:
@@ -422,7 +405,8 @@ class ProtoDC(ContinualModel):
         loss = vanilla_loss + self.args.alpha * proto_loss
 
         # Prototype alignment loss with buffer
-        if not self.buffer.is_empty():
+        # Check if buffer has any data
+        if not hasattr(self, 'buf_labels') or len(self.buf_labels) == 0:
             # Compute alignment loss between current and stored prototypes
             loss_pa = self.args.beta * self.compute_buffer_alignment_loss(features, labels)
             loss += loss_pa

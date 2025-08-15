@@ -11,9 +11,9 @@ from utils.args import add_rehearsal_args, ArgumentParser
 from utils.buffer import Buffer
 
 
-class ProtoDC(ContinualModel):
+class ProtoDCC(ContinualModel):
     """Continual learning via Prototype Set Condensation."""
-    NAME = 'protodc'
+    NAME = 'protodcc'
     COMPATIBILITY = ['class-il', 'domain-il', 'task-il', 'general-continual']
 
     @staticmethod
