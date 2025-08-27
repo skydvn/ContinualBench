@@ -65,6 +65,7 @@ def train(args: Namespace):
         logger = Logger(args, dataset.SETTING, dataset.NAME, model.NAME)
     if not args.nowand:
         assert wandb is not None, "Wandb not installed, please install it or run without wandb"
+        print("INIT WANDB")
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args))
         args.wandb_url = wandb.run.get_url()
 

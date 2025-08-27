@@ -42,6 +42,8 @@ def initialize_wandb(args: Namespace) -> None:
     """
     assert wandb is not None, "Wandb not installed, please install it or run without wandb"
 
+
+    print("=============== INIT WANDB ===============")
     run_name = args.wandb_name if args.wandb_name is not None else args.model
 
     run_id = args.conf_jobnum.split('-')[0]
@@ -148,7 +150,6 @@ def train(model: ContinualModel, dataset: ContinualDataset,
     can_compute_fwd_beforetask = True
     random_results_class, random_results_task = [], []
 
-    args.nowand = True
     if not args.nowand:
         initialize_wandb(args)
 

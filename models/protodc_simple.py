@@ -11,7 +11,7 @@ from argparse import ArgumentParser
 
 from models.utils.continual_model import ContinualModel
 from utils.args import add_rehearsal_args, ArgumentParser
-
+from utils.buffer import Buffer
 
 class ProtoDC(ContinualModel):
     """Continual learning via Prototype Set Condensation."""
@@ -27,7 +27,7 @@ class ProtoDC(ContinualModel):
                             help='Penalty weight for prototype alignment loss.')
         parser.add_argument('--lr_img', type=float, default=0.1,
                             help='Learning rate for synthetic images.')
-        parser.add_argument('--proto_steps', type=int, default=200,
+        parser.add_argument('--proto_steps', type=int, default=1,
                             help='Number of steps for prototype optimization.')
         parser.add_argument('--proto_temp', type=float, default=0.1,
                             help='Temperature for prototype similarity.')
@@ -38,6 +38,7 @@ class ProtoDC(ContinualModel):
 
 
         # Define Buffer
+        self.buffer = Buffer(self.args.buffer_size)
         # FIXME This buffer has size equal to number of classes,
         # FIXME When new prototypical exemplar according to one class is added, the last is replaced.
         self.buf_labels = {}
@@ -55,6 +56,14 @@ class ProtoDC(ContinualModel):
         self.class_prototypes = {}      # This is stored every round and reset in the next round
         self.class_exemplars = {}
         self.seen_classes = set()
+
+        # Initialize learnable synthetic prototypical exemplars:
+        self.image_syn = []
+        self.label_syn = []
+
+        # TODO Initialize learning epochs/iters for model / synthetic data
+        self.n_epoch_model = self.args.n_epochs // 2
+        self.n_epoch_data = self.args.n_epochs - self.n_epoch_model
 
     def extract_features(self, x):
         """Extract feature representations from the network."""
@@ -237,21 +246,38 @@ class ProtoDC(ContinualModel):
         """Generate synthetic prototypical data for condensation."""
         device = next(self.net.parameters()).device
 
-        # Initialize synthetic images for seen classes
-        image_syn = []
-        label_syn = []
+        # FIXME At beginning of each task (task_idx + epoch = 0), init new learnable prototypes
+        # FIXME By using self.image_syn, we can store the state + reset whenever it required
+        if self.task_iteration == 0 and self._epoch_iteration == 0:
+            # Initialize synthetic images for seen classes
+            self.image_syn = []
+            self.label_syn = []
 
-        for class_id in self.seen_classes:
-            # Create synthetic image for this class
-            syn_img = torch.randn(size=(1, self.channel, self.im_size[0], self.im_size[1]),
-                                  dtype=torch.float, requires_grad=True, device=device)
-            image_syn.append(syn_img)
+            for class_id in self.seen_classes:
+                # Create synthetic image for this class
+                syn_img = torch.randn(size=(1, self.channel, self.im_size[0], self.im_size[1]),
+                                      dtype=torch.float, requires_grad=True, device=device)
+                self.image_syn.append(syn_img)
 
-            # Create corresponding label
-            syn_label = torch.tensor([class_id], dtype=torch.long, device=device)
-            label_syn.append(syn_label)
+                # Create corresponding label
+                syn_label = torch.tensor([class_id], dtype=torch.long, device=device)
+                self.label_syn.append(syn_label)
+        else:
+            # FIXME Temporarily I will test code flow by just passing the condition.
+            pass
+            # # Initialize synthetic images for seen classes
+            # image_syn = []
+            # label_syn = []
+            #
+            # for class_id in self.seen_classes:
+            #     # Reuse the synthetic data
+            #     syn_img = self.buf_syn_img[class_id]
+            #     image_syn.append(syn_img)
+            #
+            #     # Create corresponding label
+            #     syn_label = self.buf_labels[class_id]
+            #     label_syn.append(syn_label)
 
-        return image_syn, label_syn
 
     def optimize_proto_exemplar(self, image_syn, label_syn, target_features=None):
         """
@@ -387,43 +413,55 @@ class ProtoDC(ContinualModel):
         return align_loss / count if count > 0 else torch.tensor(0.0, device=current_features.device)
 
     def observe(self, inputs, labels, not_aug_inputs, epoch=None):
-        """Main training step with prototype condensation."""
+        """Main training step with prototype condensation.
+            - First n_epoch // 2 steps:
+                Train Model
+            - Last n_epoch // 2 steps:
+                Free Model + Train Data
+        """
+        if epoch <= self.n_epoch_model:
+            # Prototype + Network Optimizer
+            self.opt.zero_grad()
 
-        # Prototype + Network Optimizer
-        self.opt.zero_grad()
+            # Forward pass
+            outputs, features = self.net(inputs, returnt = 'both')
 
-        # Forward pass
-        outputs, features = self.net(inputs, returnt = 'both')
+            # Vanilla Loss (standard classification)
+            vanilla_loss = self.loss(outputs, labels)
 
-        # Vanilla Loss (standard classification)
-        vanilla_loss = self.loss(outputs, labels)
+            # ProtoNet Loss (prototypical network loss)
+            proto_loss = self.compute_prototype_loss(features, labels)
 
-        # ProtoNet Loss (prototypical network loss)
-        proto_loss = self.compute_prototype_loss(features, labels)
+            # Combined loss
+            loss = vanilla_loss + self.args.alpha * proto_loss
 
-        # Combined loss
-        loss = vanilla_loss + self.args.alpha * proto_loss
+            # Prototype alignment loss with buffer
+            # Check if buffer has any data
+            if not hasattr(self, 'buf_labels') or len(self.buf_labels) == 0:
+                # Compute alignment loss between current and stored prototypes
+                # FIXME Need to store past inputs to support compute_buffer_alignment_loss
+                loss_pa = self.args.beta * self.compute_buffer_alignment_loss(features, labels)
+                loss += loss_pa
 
-        # Prototype alignment loss with buffer
-        # Check if buffer has any data
-        if not hasattr(self, 'buf_labels') or len(self.buf_labels) == 0:
-            # Compute alignment loss between current and stored prototypes
-            loss_pa = self.args.beta * self.compute_buffer_alignment_loss(features, labels)
-            loss += loss_pa
+            # Backward pass and optimization
+            loss.backward()
+            self.opt.step()
 
-        # Backward pass and optimization
-        loss.backward()
-        self.opt.step()
+            return loss.item()
 
         # Generate and optimize synthetic prototypes for condensation
+        # FIXME Need flag to control the training (the task needed to be looped 2 times)
+        # FIXME 1st for the model training // 2nd for the exemplar training
+
+        # FIXME At beginning of each task (task_idx + epoch = 0), init new learnable prototypes
         # FIXME As this observe is set in the loop over dataset,
         # FIXME the buffer should only save 1 data according to each class.
-        image_syn, label_syn = self.generate_synthetic_prototypes()
-        if image_syn:  # Only if we have synthetic prototypes
-            self.optimize_proto_exemplar(image_syn, label_syn, features)
+        else:
+            self.generate_synthetic_prototypes()
+            if self.image_syn:  # Only if we have synthetic prototypes
+                self.optimize_proto_exemplar(self.image_syn, self.label_syn, features)
 
-
-        return loss.item()
+            return 0
 
     def forward(self, x):
         """Forward pass through the network."""
