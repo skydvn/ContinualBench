@@ -328,7 +328,7 @@ class ProtoDC(ContinualModel):
                     if syn_proto.dim() > 1:
                         syn_proto = syn_proto.view(-1)
 
-                # Align synthetic prototype with stored target prototype
+                # TODO Align synthetic prototype with stored / target prototype
                 align_loss = criterion_proto_align(syn_proto, target_proto)
                 # keep_loss = criterion_proto_align(syn_proto, buff_proto)
                 total_loss = align_loss
