@@ -136,7 +136,6 @@ def test_prototypical_loss():
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
-    matplotlib.use("TkAgg")  # or "Qt5Agg" if you have PyQt installed
     import numpy as np
     from sklearn.decomposition import PCA
     from sklearn.manifold import TSNE

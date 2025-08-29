@@ -354,13 +354,6 @@ class ContinualModel(nn.Module):
         """
         pass
 
-    def end_task(self, dataset: 'ContinualDataset') -> None:
-        """
-        Prepares the model for the next task.
-        Executed after each task.
-        """
-        pass
-
     def end_epoch(self, epoch: int, dataset: 'ContinualDataset') -> None:
         """
         Prepares the model for the next epoch.

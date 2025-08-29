@@ -1,4 +1,4 @@
-# Copyright 2020-present, Pietro Buzzega, Matteo Boschini, Angelo Porrello, Davide Abati, Simone Calderara.
+# Copyright 2025-present, Minh-Duong Nguyen
 # All rights reserved.
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.optim import SGD, Adam
 from argparse import ArgumentParser
 
+from models.protocore_utils.proto_visualize import PrototypicalVisualizer
 from models.utils.continual_model import ContinualModel
 from utils.args import add_rehearsal_args, ArgumentParser
 from utils.buffer import Buffer
@@ -36,6 +37,7 @@ class ProtoDC(ContinualModel):
     def __init__(self, backbone, loss, args, transform, dataset=None):
         super().__init__(backbone, loss, args, transform, dataset=dataset)
 
+        self.visualizer = PrototypicalVisualizer(figsize=(16, 12))
 
         # Define Buffer
         self.buffer = Buffer(self.args.buffer_size)
@@ -277,6 +279,8 @@ class ProtoDC(ContinualModel):
             #     # Create corresponding label
             #     syn_label = self.buf_labels[class_id]
             #     label_syn.append(syn_label)
+        print(f"generate synthetic prototypes")
+        print(f"image_syn: {self.image_syn}")
 
 
     def optimize_proto_exemplar(self, image_syn, label_syn, target_features=None):
@@ -357,6 +361,8 @@ class ProtoDC(ContinualModel):
         """
         with torch.no_grad():
             for syn_img, syn_label in zip(image_syn, label_syn):
+                print(f"==== storing ====")
+                print(f"syn_img: {syn_img}")
                 class_id = syn_label.item()
                 # FIXME Add synthetic exemplar to buffer
                 # FIXME buffer size 1xCxHxW
@@ -419,7 +425,9 @@ class ProtoDC(ContinualModel):
             - Last n_epoch // 2 steps:
                 Free Model + Train Data
         """
-        if epoch <= self.n_epoch_model:
+
+        if epoch <= self.n_epoch_model-1:
+            print(f"Update Model epoch:{epoch} / epoch_model: {self.n_epoch_model}")
             # Prototype + Network Optimizer
             self.opt.zero_grad()
 
@@ -457,6 +465,7 @@ class ProtoDC(ContinualModel):
         # FIXME As this observe is set in the loop over dataset,
         # FIXME the buffer should only save 1 data according to each class.
         else:
+            print(f"Update Data epoch:{epoch} / epoch_model: {self.n_epoch_model}")
             self.generate_synthetic_prototypes()
             if self.image_syn:  # Only if we have synthetic prototypes
                 self.optimize_proto_exemplar(self.image_syn, self.label_syn, features)
@@ -466,3 +475,54 @@ class ProtoDC(ContinualModel):
     def forward(self, x):
         """Forward pass through the network."""
         return self.net(x)
+
+    def end_epoch(self, epoch: int, dataset: 'ContinualDataset') -> None:
+        """
+            - Prepares the model for the next epoch.
+            - Visualize every epoch.
+        """
+        if self._current_task < 0:
+            pass
+        else:
+            if epoch <= self.n_epoch_model:
+                pass
+            else:
+                # 1. Extract embeddings + labels from full dataset
+                all_features, all_labels = [], []
+                with torch.no_grad():
+                    for k, test_loader in enumerate(dataset.test_loaders):
+                        for inputs, targets in test_loader:
+                            inputs, targets = inputs.to(self.net.device), targets.to(self.net.device)
+                            _, feats = self.net(inputs, returnt = 'both')
+                            all_features.append(feats.cpu())
+                            all_labels.append(targets.cpu())
+
+                all_features = torch.cat(all_features, dim=0)
+                all_labels = torch.cat(all_labels, dim=0)
+
+                pro_parts = []
+                pre_parts = []
+                print(self.seen_classes)
+                print(self.buf_syn_img)
+                for class_id in self.seen_classes:
+                    buf_prediction , buf_proto = self.net(self.buf_syn_img[class_id], returnt='both') # Single exemplar feature
+                    print(buf_proto)
+                    pre_parts.append(buf_prediction)
+                    pro_parts.append(buf_proto)
+
+                prototypes = torch.cat(pro_parts, dim=0)
+                predictions = torch.cat(pre_parts, dim=0)
+
+                # 3. Visualize with your method
+                fig = self.visualizer.visualize_episode(
+                    support_embeddings=all_features,
+                    support_labels=all_labels,
+                    query_embeddings=None,  # if you want all in one set, can leave None
+                    query_labels=None,
+                    prototypes=prototypes,
+                    predictions=predictions,
+                    method="tsne",  # or "pca"
+                    title="t-SNE on Full Dataset"
+                )
+                plt.savefig(f"task{self._current_task}-epoch{epoch}.png")  # saves to file
+                plt.close()
