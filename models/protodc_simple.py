@@ -248,9 +248,12 @@ class ProtoDC(ContinualModel):
         """Generate synthetic prototypical data for condensation."""
         device = next(self.net.parameters()).device
 
+        print(f"generate synthetic prototypes/seen: {self.seen_classes}"
+              f"/task: {self._task_iteration}/epoch:{self._epoch_iteration}")
         # FIXME At beginning of each task (task_idx + epoch = 0), init new learnable prototypes
         # FIXME By using self.image_syn, we can store the state + reset whenever it required
-        if self.task_iteration == 0 and self._epoch_iteration == 0:
+        if (self._past_epoch <= self.n_epoch_model-1
+                and self._epoch_iteration == 0):
             # Initialize synthetic images for seen classes
             self.image_syn = []
             self.label_syn = []
@@ -264,6 +267,7 @@ class ProtoDC(ContinualModel):
                 # Create corresponding label
                 syn_label = torch.tensor([class_id], dtype=torch.long, device=device)
                 self.label_syn.append(syn_label)
+                print(f"class:{class_id} - syn_image:{syn_img}")
         else:
             # FIXME Temporarily I will test code flow by just passing the condition.
             pass
@@ -279,7 +283,6 @@ class ProtoDC(ContinualModel):
             #     # Create corresponding label
             #     syn_label = self.buf_labels[class_id]
             #     label_syn.append(syn_label)
-        print(f"generate synthetic prototypes")
         print(f"image_syn: {self.image_syn}")
 
 
@@ -299,6 +302,8 @@ class ProtoDC(ContinualModel):
         if not image_syn:
             return
 
+        print(f"Optimize Exemplar")
+        tmp_image_syn = []
         criterion_proto_align = nn.MSELoss()
         # Optimize each synthetic exemplar individually
         for i, (syn_img, syn_label) in enumerate(zip(image_syn, label_syn)):
@@ -346,10 +351,12 @@ class ProtoDC(ContinualModel):
                     # Clamp pixel values to reasonable range (e.g., [0, 1] or [-1, 1])
                     syn_img.clamp_(-2.0, 2.0)  # Adjust range based on your data normalization
 
+                tmp_image_syn.append([syn_img])
+
         print(f"average proto loss: {total_loss.item()}")
 
         # Update buffer with optimized synthetic exemplars
-        self._add_synthetic_to_buffer(image_syn, label_syn)
+        self._add_synthetic_to_buffer(tmp_image_syn, label_syn)
 
     def _add_synthetic_to_buffer(self, image_syn, label_syn):
         """
