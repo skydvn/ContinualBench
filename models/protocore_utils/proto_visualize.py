@@ -4,6 +4,7 @@ from sklearn.decomposition import PCA
 import torch
 import numpy as np
 
+
 class Visualizer:
     def __init__(self, save_dir=None):
         self.save_dir = save_dir

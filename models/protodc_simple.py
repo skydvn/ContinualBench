@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.optim import SGD, Adam
 from argparse import ArgumentParser
 
+from models.protocore_utils.protocore_loss import euclidean_dist
 from models.protocore_utils.proto_visualize import Visualizer
 from models.utils.continual_model import ContinualModel
 from utils.args import add_rehearsal_args, ArgumentParser
@@ -169,6 +170,60 @@ class ProtoDC(ContinualModel):
         else:
             return torch.tensor(0.0, device=device)
 
+    def prototypical_loss(self, input, target, n_query):
+        """
+        Compute prototypical loss and accuracy using fixed n_query per class.
+
+        Args:
+            input (Tensor): Model output of shape [N, D]
+            target (Tensor): Ground truth labels of shape [N]
+            n_query (int): Number of query samples per class
+
+        Returns:
+            Tuple[Tensor, Tensor]: loss and accuracy
+        """
+        classes = torch.unique(target)
+        n_classes = len(classes)
+
+        support_idxs = []
+        query_idxs = []
+
+        for cls in classes:
+            cls_idxs = (target == cls).nonzero(as_tuple=True)[0]
+            if len(cls_idxs) < n_query + 1:
+                raise ValueError(f"Not enough samples for class {cls.item()}: need > {n_query}, got {len(cls_idxs)}")
+            query_idxs.append(cls_idxs[-n_query:])
+            support_idxs.append(cls_idxs[:-n_query])
+
+        support_idxs = torch.cat(support_idxs)
+        query_idxs = torch.cat(query_idxs)
+
+        support = input[support_idxs]
+        query = input[query_idxs]
+
+        prototypes = []
+        for cls in classes:
+            cls_support = support[(target[support_idxs] == cls)]
+            prototypes.append(cls_support.mean(0))
+
+            # Update stored prototypes for future use
+            self.class_prototypes[cls.item()] = cls_support.mean(0).detach()
+            self.seen_classes.add(cls.item())
+
+        prototypes = torch.stack(prototypes)
+
+        dists = euclidean_dist(query, prototypes)
+        log_p_y = F.log_softmax(-dists, dim=1)
+
+        target_inds = torch.arange(n_classes, device=target.device).repeat_interleave(n_query)
+        loss = -log_p_y[range(len(query_idxs)), target_inds].mean()
+
+        pred = log_p_y.argmax(dim=1)
+        acc = (pred == target_inds).float().mean()
+
+        return loss, acc
+
+
     def generate_synthetic_prototypes(self):
         """Generate synthetic prototypical data for condensation."""
         device = next(self.net.parameters()).device
@@ -238,6 +293,8 @@ class ProtoDC(ContinualModel):
 
             # Skip if we haven't seen this class yet (no prototype to align to)
             if class_id not in self.class_prototypes:
+                print(class_id)
+                print(self.class_prototypes)
                 continue
 
             # Create optimizer for this specific synthetic image
@@ -360,7 +417,7 @@ class ProtoDC(ContinualModel):
         """
 
         if epoch <= self.n_epoch_model-1:
-            print(f"Update Model epoch:{epoch} / epoch_model: {self.n_epoch_model}")
+            # print(f"Update Model epoch:{epoch} / epoch_model: {self.n_epoch_model}")
             # Prototype + Network Optimizer
             self.opt.zero_grad()
 
@@ -371,7 +428,8 @@ class ProtoDC(ContinualModel):
             vanilla_loss = self.loss(outputs, labels)
 
             # ProtoNet Loss (prototypical network loss)
-            proto_loss = self.compute_prototype_loss(features, labels)
+            proto_loss, _ = self.prototypical_loss(features, labels, 20)
+            # proto_loss = self.compute_prototype_loss(features, labels)
 
             # Combined loss
             loss = vanilla_loss + self.args.alpha * proto_loss
