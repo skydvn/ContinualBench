@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch.optim import SGD, Adam
 from argparse import ArgumentParser
 
-from models.protocore_utils.proto_visualize import PrototypicalVisualizer
+from models.protocore_utils.proto_visualize import Visualizer
 from models.utils.continual_model import ContinualModel
 from utils.args import add_rehearsal_args, ArgumentParser
 from utils.buffer import Buffer
@@ -22,9 +22,9 @@ class ProtoDC(ContinualModel):
     @staticmethod
     def get_parser(parser) -> ArgumentParser:
         add_rehearsal_args(parser)
-        parser.add_argument('--alpha', type=float, required=True,
+        parser.add_argument('--alpha', type=float, required=True, default = 0.1,
                             help='Penalty weight for prototype loss.')
-        parser.add_argument('--beta', type=float, required=True,
+        parser.add_argument('--beta', type=float, required=True, default = 0.1,
                             help='Penalty weight for prototype alignment loss.')
         parser.add_argument('--lr_img', type=float, default=0.1,
                             help='Learning rate for synthetic images.')
@@ -37,7 +37,7 @@ class ProtoDC(ContinualModel):
     def __init__(self, backbone, loss, args, transform, dataset=None):
         super().__init__(backbone, loss, args, transform, dataset=dataset)
 
-        self.visualizer = PrototypicalVisualizer(figsize=(16, 12))
+        self.visualizer = Visualizer(save_dir = "./tsne")
 
         # Define Buffer
         self.buffer = Buffer(self.args.buffer_size)
@@ -169,81 +169,6 @@ class ProtoDC(ContinualModel):
         else:
             return torch.tensor(0.0, device=device)
 
-    # Alternative vectorized implementation for better efficiency
-    def compute_prototype_loss_vectorized(self, features, labels):
-        """
-        Vectorized version of prototypical network loss computation.
-        More efficient for larger batches.
-        """
-        device = features.device
-        unique_labels = torch.unique(labels)
-        N_C = len(unique_labels)
-
-        if N_C == 0:
-            return torch.tensor(0.0, device=device)
-
-        # Compute prototypes for each class
-        prototypes = []
-        prototype_labels = []
-
-        for label in unique_labels:
-            class_mask = (labels == label)
-            class_features = features[class_mask]
-
-            if len(class_features) > 0:
-                prototype = class_features.mean(dim=0)
-                prototypes.append(prototype)
-                prototype_labels.append(label)
-
-                # Update stored prototypes for future use
-                self.class_prototypes[label.item()] = prototypes[label.item()].detach()
-                self.seen_classes.add(label.item())
-
-        if len(prototypes) == 0:
-            return torch.tensor(0.0, device=device)
-
-        # Stack prototypes: (num_classes, feature_dim)
-        prototypes = torch.stack(prototypes)
-        prototype_labels = torch.tensor(prototype_labels, device=device)
-
-        # Compute pairwise squared distances: (batch_size, num_classes)
-        # ||f_φ(x) - c_k||²
-        distances = torch.cdist(features.unsqueeze(1), prototypes.unsqueeze(0)).squeeze(1) ** 2
-
-        # For each sample, find the index of its true class prototype
-        true_class_indices = []
-        for i, label in enumerate(labels):
-            try:
-                idx = (prototype_labels == label).nonzero(as_tuple=True)[0][0]
-                true_class_indices.append(idx)
-            except IndexError:
-                # Handle case where prototype for this label doesn't exist
-                true_class_indices.append(0)  # Default to first prototype
-
-        true_class_indices = torch.tensor(true_class_indices, device=device)
-
-        # Get distances to true class prototypes: d(f_φ(x), c_k)
-        true_distances = distances[torch.arange(len(labels)), true_class_indices]
-
-        # Compute log-sum-exp over all prototypes EXCEPT true class: log(∑_{k'≠k} exp(-d(f_φ(x), c_k')))
-        # Create mask to exclude true class distances
-        batch_indices = torch.arange(len(labels), device=device)
-
-        # Set true class distances to -inf so they don't contribute to logsumexp
-        masked_distances = distances.clone()
-        masked_distances[batch_indices, true_class_indices] = float('-inf')
-
-        log_sum_exp = torch.logsumexp(-masked_distances, dim=1)
-
-        # Compute loss for each sample: d(f_φ(x), c_k) + log(∑_{k'} exp(-d(f_φ(x), c_k')))
-        sample_losses = true_distances + log_sum_exp
-
-        # Average over all samples: 1/(N_C × N_Q)
-        N_Q = len(labels)
-        normalized_loss = sample_losses.mean() / N_C
-
-        return normalized_loss
-
     def generate_synthetic_prototypes(self):
         """Generate synthetic prototypical data for condensation."""
         device = next(self.net.parameters()).device
@@ -252,7 +177,8 @@ class ProtoDC(ContinualModel):
               f"/task: {self._task_iteration}/epoch:{self._epoch_iteration}")
         # FIXME At beginning of each task (task_idx + epoch = 0), init new learnable prototypes
         # FIXME By using self.image_syn, we can store the state + reset whenever it required
-        if (self._past_epoch <= self.n_epoch_model-1
+        print(f"past: {self._past_epoch} - epoch_model: {self.n_epoch_model}")
+        if (self._past_epoch == self.n_epoch_model
                 and self._epoch_iteration == 0):
             # Initialize synthetic images for seen classes
             self.image_syn = []
@@ -267,7 +193,7 @@ class ProtoDC(ContinualModel):
                 # Create corresponding label
                 syn_label = torch.tensor([class_id], dtype=torch.long, device=device)
                 self.label_syn.append(syn_label)
-                print(f"class:{class_id} - syn_image:{syn_img}")
+                # print(f"class:{class_id} - syn_image:{syn_img}")
         else:
             # FIXME Temporarily I will test code flow by just passing the condition.
             pass
@@ -283,7 +209,8 @@ class ProtoDC(ContinualModel):
             #     # Create corresponding label
             #     syn_label = self.buf_labels[class_id]
             #     label_syn.append(syn_label)
-        print(f"image_syn: {self.image_syn}")
+
+        # print(f"image_syn: {self.image_syn}")
 
 
     def optimize_proto_exemplar(self, image_syn, label_syn, target_features=None):
@@ -351,7 +278,7 @@ class ProtoDC(ContinualModel):
                     # Clamp pixel values to reasonable range (e.g., [0, 1] or [-1, 1])
                     syn_img.clamp_(-2.0, 2.0)  # Adjust range based on your data normalization
 
-                tmp_image_syn.append([syn_img])
+                tmp_image_syn.append(syn_img)
 
         print(f"average proto loss: {total_loss.item()}")
 
@@ -368,8 +295,7 @@ class ProtoDC(ContinualModel):
         """
         with torch.no_grad():
             for syn_img, syn_label in zip(image_syn, label_syn):
-                print(f"==== storing ====")
-                print(f"syn_img: {syn_img}")
+                # print(f"==== storing ====")
                 class_id = syn_label.item()
                 # FIXME Add synthetic exemplar to buffer
                 # FIXME buffer size 1xCxHxW
@@ -475,7 +401,9 @@ class ProtoDC(ContinualModel):
             print(f"Update Data epoch:{epoch} / epoch_model: {self.n_epoch_model}")
             self.generate_synthetic_prototypes()
             if self.image_syn:  # Only if we have synthetic prototypes
-                self.optimize_proto_exemplar(self.image_syn, self.label_syn, features)
+                self.optimize_proto_exemplar(image_syn = self.image_syn,
+                                             label_syn = self.label_syn
+                                             )
 
             return 0
 
@@ -491,7 +419,8 @@ class ProtoDC(ContinualModel):
         if self._current_task < 0:
             pass
         else:
-            if epoch <= self.n_epoch_model:
+            print(f"end epoch // epoch: {epoch} // e_model: {self.n_epoch_model}")
+            if epoch <= self.n_epoch_model-1:
                 pass
             else:
                 # 1. Extract embeddings + labels from full dataset
@@ -509,27 +438,24 @@ class ProtoDC(ContinualModel):
 
                 pro_parts = []
                 pre_parts = []
-                print(self.seen_classes)
-                print(self.buf_syn_img)
                 for class_id in self.seen_classes:
                     buf_prediction , buf_proto = self.net(self.buf_syn_img[class_id], returnt='both') # Single exemplar feature
-                    print(buf_proto)
-                    pre_parts.append(buf_prediction)
-                    pro_parts.append(buf_proto)
+                    pre_parts.append(buf_prediction.detach().cpu())
+                    pro_parts.append(buf_proto.cpu())
 
                 prototypes = torch.cat(pro_parts, dim=0)
                 predictions = torch.cat(pre_parts, dim=0)
 
                 # 3. Visualize with your method
                 fig = self.visualizer.visualize_episode(
-                    support_embeddings=all_features,
-                    support_labels=all_labels,
-                    query_embeddings=None,  # if you want all in one set, can leave None
-                    query_labels=None,
+                    embeddings=all_features,
+                    labels=all_labels,
+                    task=self._current_task,
+                    epoch=epoch,
                     prototypes=prototypes,
                     predictions=predictions,
                     method="tsne",  # or "pca"
                     title="t-SNE on Full Dataset"
                 )
-                plt.savefig(f"task{self._current_task}-epoch{epoch}.png")  # saves to file
-                plt.close()
+                # plt.savefig(f"task{self._current_task}-epoch{epoch}.png")  # saves to file
+                # plt.close()
