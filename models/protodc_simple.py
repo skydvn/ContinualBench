@@ -27,7 +27,7 @@ class ProtoDC(ContinualModel):
                             help='Penalty weight for prototype loss.')
         parser.add_argument('--beta', type=float, required=True, default = 0.1,
                             help='Penalty weight for prototype alignment loss.')
-        parser.add_argument('--lr_img', type=float, default=0.1,
+        parser.add_argument('--lr_img', type=float, default=0.5,
                             help='Learning rate for synthetic images.')
         parser.add_argument('--proto_steps', type=int, default=1,
                             help='Number of steps for prototype optimization.')
@@ -302,41 +302,39 @@ class ProtoDC(ContinualModel):
             optimizer_img = SGD([syn_img], lr=self.args.lr_img, momentum=0.5)
             target_proto = self.class_prototypes[class_id]
 
-            # Optimize this synthetic exemplar over multiple steps
-            for step in range(self.proto_steps):
-                optimizer_img.zero_grad()
-                total_loss = 0
+            # Optimize this synthetic exemplar over single step
+            optimizer_img.zero_grad()
+            total_loss = 0
 
-                # Forward pass: get features from synthetic image
-                # syn_img has shape (1, C, H, W) - single exemplar image
-                syn_features = self.extract_features(syn_img)
+            # Forward pass: get features from synthetic image
+            # syn_img has shape (1, C, H, W) - single exemplar image
+            syn_features = self.extract_features(syn_img)
 
-                # syn_features has shape (1, feature_dim) - features from the single exemplar
-                # The exemplar itself IS the prototype, so we squeeze the batch dimension
-                syn_proto = syn_features.squeeze(0)  # Remove batch dimension: (feature_dim,)
+            # syn_features has shape (1, feature_dim) - features from the single exemplar
+            # The exemplar itself IS the prototype, so we squeeze the batch dimension
+            syn_proto = syn_features.squeeze(0)  # Remove batch dimension: (feature_dim,)
 
-                # Ensure target prototype has same shape
-                if target_proto.dim() != syn_proto.dim():
-                    if target_proto.dim() > 1:
-                        target_proto = target_proto.view(-1)
-                    if syn_proto.dim() > 1:
-                        syn_proto = syn_proto.view(-1)
+            # Ensure target prototype has same shape
+            if target_proto.dim() != syn_proto.dim():
+                if target_proto.dim() > 1:
+                    target_proto = target_proto.view(-1)
+                if syn_proto.dim() > 1:
+                    syn_proto = syn_proto.view(-1)
 
-                # TODO Align synthetic prototype with stored / target prototype
-                align_loss = criterion_proto_align(syn_proto, target_proto)
-                # keep_loss = criterion_proto_align(syn_proto, buff_proto)
-                total_loss = align_loss
+            # TODO Align synthetic prototype with stored / target prototype
+            align_loss = criterion_proto_align(syn_proto, target_proto)
+            # keep_loss = criterion_proto_align(syn_proto_1, buff_proto)
+            total_loss = align_loss
 
-                # Backward pass and optimization step
-                total_loss.backward()
-                optimizer_img.step()
+            # Backward pass and optimization step
+            total_loss.backward()
+            optimizer_img.step()
 
-                # Optional: Add some constraints to keep synthetic images realistic
-                with torch.no_grad():
-                    # Clamp pixel values to reasonable range (e.g., [0, 1] or [-1, 1])
-                    syn_img.clamp_(-2.0, 2.0)  # Adjust range based on your data normalization
+            # Optional: Add some constraints to keep synthetic images realistic
+            with torch.no_grad():
+                syn_img.clamp_(-2.0, 2.025)  # Adjust range based on your data normalization
 
-                tmp_image_syn.append(syn_img)
+            tmp_image_syn.append(syn_img)
 
         print(f"average proto loss: {total_loss.item()}")
 
@@ -481,7 +479,7 @@ class ProtoDC(ContinualModel):
             pass
         else:
             print(f"end epoch // epoch: {epoch} // e_model: {self.n_epoch_model}")
-            if epoch % 20 != 0:
+            if epoch % 25 != 0:
                 pass
             else:
                 # 1. Extract embeddings + labels from full dataset
@@ -529,8 +527,8 @@ class ProtoDC(ContinualModel):
                     if class_id in self.buf_syn_img:
                         print("IN")
                         if self.buf_syn_img[class_id] is not None:
-                            print(self.buf_syn_img[class_id])
-                            syn_protos.append(self.buf_syn_img[class_id])
+                            _, feats = self.net(self.buf_syn_img[class_id], returnt='both')
+                            syn_protos.append(feats.squeeze(0).cpu())
                         else:
                             print("None1")
                             syn_protos.append(torch.zeros(all_features.size(1)))
