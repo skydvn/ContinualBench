@@ -10,7 +10,7 @@ import torch
 import numpy as np
 import torch.nn as nn
 import torch.utils
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from datasets.utils.label_noise import build_noisy_labels
 from datasets.utils.validation import get_validation_indexes
@@ -553,3 +553,34 @@ def fix_class_names_order(class_names: List[str], args: Namespace) -> List[str]:
     if args.permute_classes:
         class_names = [class_names[np.where(args.class_order == i)[0][0]] for i in range(len(class_names))]
     return class_names
+
+def reshuffle_dataloader(dataloader, batch_size=None):
+    """
+    Take an existing DataLoader yielding (inputs, labels, not_aug_inputs),
+    flatten all data, shuffle, and return a new DataLoader.
+    """
+    all_inputs, all_labels, all_not_aug = [], [], []
+
+    # Flatten everything
+    for inputs, labels, not_aug_inputs in dataloader:
+        all_inputs.append(inputs)
+        all_labels.append(labels)
+        all_not_aug.append(not_aug_inputs)
+
+    all_inputs = torch.cat(all_inputs)
+    all_labels = torch.cat(all_labels)
+    all_not_aug = torch.cat(all_not_aug)
+
+    # Shuffle consistently
+    indices = torch.randperm(len(all_inputs))
+    all_inputs = all_inputs[indices]
+    all_labels = all_labels[indices]
+    all_not_aug = all_not_aug[indices]
+
+    # Rebuild dataset
+    dataset = TensorDataset(all_inputs, all_labels, all_not_aug)
+
+    # Keep same batch size unless overridden
+    batch_size = batch_size or dataloader.batch_size
+
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False)

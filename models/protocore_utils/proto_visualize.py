@@ -71,6 +71,8 @@ class Visualizer:
 
         plt.tight_layout()
 
+        if not os.path.exists(self.save_dir):
+            os.makedirs(self.save_dir)
         # Save if dir is set
         if self.save_dir is not None:
             path = f"{self.save_dir}/{task}{epoch}{title.replace(' ', '_')}.png"

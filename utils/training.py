@@ -15,7 +15,7 @@ import logging
 import torch
 from tqdm.auto import tqdm
 from datasets import get_dataset
-from datasets.utils.continual_dataset import ContinualDataset, MammothDatasetWrapper
+from datasets.utils.continual_dataset import ContinualDataset, MammothDatasetWrapper, reshuffle_dataloader
 from datasets.utils.gcl_dataset import GCLDataset
 from models.utils.continual_model import ContinualModel
 from models.utils.future_model import FutureModel
@@ -82,6 +82,7 @@ def train_single_epoch(model: ContinualModel,
         the number of iterations performed in the current epoch
     """
     global GLOBALS
+    train_loader = reshuffle_dataloader(train_loader, args.batch_size)
     train_iter = iter(train_loader)
     i = 0
 

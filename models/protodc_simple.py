@@ -38,7 +38,8 @@ class ProtoDC(ContinualModel):
     def __init__(self, backbone, loss, args, transform, dataset=None):
         super().__init__(backbone, loss, args, transform, dataset=dataset)
 
-        self.visualizer = Visualizer(save_dir = "./tsne")
+        note = "syn_proto"
+        self.visualizer = Visualizer(save_dir = f"./tsne/{note}")
 
         # Define Buffer
         self.buffer = Buffer(self.args.buffer_size)
@@ -190,6 +191,7 @@ class ProtoDC(ContinualModel):
 
         for cls in classes:
             cls_idxs = (target == cls).nonzero(as_tuple=True)[0]
+            print(f"class {cls}: {len(cls_idxs)}")
             if len(cls_idxs) < n_query + 1:
                 raise ValueError(f"Not enough samples for class {cls.item()}: need > {n_query}, got {len(cls_idxs)}")
             query_idxs.append(cls_idxs[-n_query:])
@@ -294,7 +296,6 @@ class ProtoDC(ContinualModel):
             # Skip if we haven't seen this class yet (no prototype to align to)
             if class_id not in self.class_prototypes:
                 print(class_id)
-                print(self.class_prototypes)
                 continue
 
             # Create optimizer for this specific synthetic image
@@ -416,7 +417,7 @@ class ProtoDC(ContinualModel):
                 Free Model + Train Data
         """
 
-        if epoch <= self.n_epoch_model-1:
+        if epoch <= (self.n_epoch_model*2)-1:
             # print(f"Update Model epoch:{epoch} / epoch_model: {self.n_epoch_model}")
             # Prototype + Network Optimizer
             self.opt.zero_grad()
@@ -432,7 +433,7 @@ class ProtoDC(ContinualModel):
             # proto_loss = self.compute_prototype_loss(features, labels)
 
             # Combined loss
-            loss = vanilla_loss + self.args.alpha * proto_loss
+            loss = (1-self.args.alpha) * vanilla_loss + self.args.alpha * proto_loss
 
             # Prototype alignment loss with buffer
             # Check if buffer has any data
@@ -456,18 +457,20 @@ class ProtoDC(ContinualModel):
         # FIXME As this observe is set in the loop over dataset,
         # FIXME the buffer should only save 1 data according to each class.
         else:
-            print(f"Update Data epoch:{epoch} / epoch_model: {self.n_epoch_model}")
-            self.generate_synthetic_prototypes()
-            if self.image_syn:  # Only if we have synthetic prototypes
-                self.optimize_proto_exemplar(image_syn = self.image_syn,
-                                             label_syn = self.label_syn
-                                             )
+            # print(f"Update Data epoch:{epoch} / epoch_model: {self.n_epoch_model}")
+            # self.generate_synthetic_prototypes()
+            # if self.image_syn:  # Only if we have synthetic prototypes
+            #     self.optimize_proto_exemplar(image_syn = self.image_syn,
+            #                                  label_syn = self.label_syn
+            #                                  )
 
             return 0
+
 
     def forward(self, x):
         """Forward pass through the network."""
         return self.net(x)
+
 
     def end_epoch(self, epoch: int, dataset: 'ContinualDataset') -> None:
         """
@@ -478,7 +481,7 @@ class ProtoDC(ContinualModel):
             pass
         else:
             print(f"end epoch // epoch: {epoch} // e_model: {self.n_epoch_model}")
-            if epoch <= self.n_epoch_model-1:
+            if epoch % 20 != 0:
                 pass
             else:
                 # 1. Extract embeddings + labels from full dataset
@@ -496,13 +499,34 @@ class ProtoDC(ContinualModel):
 
                 pro_parts = []
                 pre_parts = []
-                for class_id in self.seen_classes:
-                    buf_prediction , buf_proto = self.net(self.buf_syn_img[class_id], returnt='both') # Single exemplar feature
-                    pre_parts.append(buf_prediction.detach().cpu())
-                    pro_parts.append(buf_proto.cpu())
+                # for class_id in self.seen_classes:
+                #     buf_prediction , buf_proto = self.net(self.buf_syn_img[class_id], returnt='both') # Single exemplar feature
+                #     pre_parts.append(buf_prediction.detach().cpu())
+                #     pro_parts.append(buf_proto.cpu())
 
-                prototypes = torch.cat(pro_parts, dim=0)
-                predictions = torch.cat(pre_parts, dim=0)
+                # prototypes = torch.cat(pro_parts, dim=0)
+                # predictions = torch.cat(pre_parts, dim=0)
+
+                prototypes = []
+                predictions = []
+                num_classes = len(self.seen_classes)
+                for class_id in self.seen_classes:
+                    class_mask = (all_labels == class_id)
+                    class_features = all_features[class_mask]
+
+                    if len(class_features) > 0:
+                        proto = class_features.mean(dim=0)  # centroid of features
+                        prototypes.append(proto)
+                        predictions_onehot = torch.nn.functional.one_hot(torch.tensor(class_id), num_classes=num_classes).float()
+                        predictions.append(predictions_onehot)
+                    else:
+                        # if no samples of this class are present
+                        prototypes.append(torch.zeros(all_features.size(1)))
+                        predictions_onehot = torch.nn.functional.one_hot(torch.tensor(class_id), num_classes=num_classes).float()
+                        predictions.append(predictions_onehot)
+
+                prototypes = torch.stack(prototypes, dim=0)  # [num_classes, D]
+                predictions = torch.stack(predictions, dim=0)
 
                 # 3. Visualize with your method
                 fig = self.visualizer.visualize_episode(
