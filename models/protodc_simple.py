@@ -417,7 +417,7 @@ class ProtoDC(ContinualModel):
                 Free Model + Train Data
         """
 
-        if epoch <= (self.n_epoch_model*2)-1:
+        if epoch <= self.n_epoch_model -1:
             # print(f"Update Model epoch:{epoch} / epoch_model: {self.n_epoch_model}")
             # Prototype + Network Optimizer
             self.opt.zero_grad()
@@ -457,12 +457,12 @@ class ProtoDC(ContinualModel):
         # FIXME As this observe is set in the loop over dataset,
         # FIXME the buffer should only save 1 data according to each class.
         else:
-            # print(f"Update Data epoch:{epoch} / epoch_model: {self.n_epoch_model}")
-            # self.generate_synthetic_prototypes()
-            # if self.image_syn:  # Only if we have synthetic prototypes
-            #     self.optimize_proto_exemplar(image_syn = self.image_syn,
-            #                                  label_syn = self.label_syn
-            #                                  )
+            print(f"Update Data epoch:{epoch} / epoch_model: {self.n_epoch_model}")
+            self.generate_synthetic_prototypes()
+            if self.image_syn:  # Only if we have synthetic prototypes
+                self.optimize_proto_exemplar(image_syn = self.image_syn,
+                                             label_syn = self.label_syn
+                                             )
 
             return 0
 
@@ -507,6 +507,7 @@ class ProtoDC(ContinualModel):
                 # prototypes = torch.cat(pro_parts, dim=0)
                 # predictions = torch.cat(pre_parts, dim=0)
 
+                syn_protos = []
                 prototypes = []
                 predictions = []
                 num_classes = len(self.seen_classes)
@@ -525,8 +526,21 @@ class ProtoDC(ContinualModel):
                         predictions_onehot = torch.nn.functional.one_hot(torch.tensor(class_id), num_classes=num_classes).float()
                         predictions.append(predictions_onehot)
 
+                    if class_id in self.buf_syn_img:
+                        print("IN")
+                        if self.buf_syn_img[class_id] is not None:
+                            print(self.buf_syn_img[class_id])
+                            syn_protos.append(self.buf_syn_img[class_id])
+                        else:
+                            print("None1")
+                            syn_protos.append(torch.zeros(all_features.size(1)))
+                    else:
+                        print("None2")
+                        syn_protos.append(torch.zeros(all_features.size(1)))
+
                 prototypes = torch.stack(prototypes, dim=0)  # [num_classes, D]
                 predictions = torch.stack(predictions, dim=0)
+                syn_protos = torch.stack(syn_protos, dim=0)  # [num_classes, D]
 
                 # 3. Visualize with your method
                 fig = self.visualizer.visualize_episode(
@@ -536,6 +550,7 @@ class ProtoDC(ContinualModel):
                     epoch=epoch,
                     prototypes=prototypes,
                     predictions=predictions,
+                    syn_proto = syn_protos,
                     method="tsne",  # or "pca"
                     title="t-SNE on Full Dataset"
                 )

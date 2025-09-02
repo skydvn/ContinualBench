@@ -3,6 +3,7 @@ from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 import torch
 import numpy as np
+import os
 
 
 class Visualizer:
@@ -10,7 +11,7 @@ class Visualizer:
         self.save_dir = save_dir
 
     def visualize_episode(self, embeddings, labels, task, epoch,
-                          prototypes=None, predictions=None,
+                          prototypes=None, predictions=None, syn_proto = None,
                           method="tsne", title="Episode Visualization"):
         """
         Visualize embeddings + prototypes in 2D, coloring prototypes by predicted class.
@@ -27,7 +28,9 @@ class Visualizer:
         X = embeddings.detach().cpu().numpy()
         y = labels.detach().cpu().numpy()
 
-        P, P_pred = None, None
+        P, P_syn, P_pred = None, None, None
+        if syn_proto is not None:
+            P_syn = syn_proto.detach().cpu().numpy()
         if prototypes is not None:
             P = prototypes.detach().cpu().numpy()
             if predictions is not None:
@@ -65,6 +68,27 @@ class Visualizer:
                     label="Prototypes"
                 )
 
+        # Synthetic prototypes: map them with same reducer
+        if P_syn is not None:
+            all_concat = np.vstack([X, P_syn])
+            all_Z = reducer.fit_transform(all_concat)
+            PZ = all_Z[-P_syn.shape[0]:]
+
+            if P_pred is not None:
+                ax.scatter(
+                    PZ[:, 0], PZ[:, 1],
+                    c=P_pred, cmap="tab20",
+                    marker= '^', s=200, edgecolor="k", linewidth=1.2,
+                    label="Prototypes"
+                )
+            else:
+                ax.scatter(
+                    PZ[:, 0], PZ[:, 1],
+                    c="black", marker= '^', s=200, edgecolor="k", linewidth=1.2,
+                    label="Prototypes"
+                )
+
+
         ax.set_title(title)
         ax.legend(*scatter.legend_elements(num=None), title="Classes",
                   bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -72,7 +96,7 @@ class Visualizer:
         plt.tight_layout()
 
         if not os.path.exists(self.save_dir):
-            os.makedirs(self.save_dir)
+            os.makedirs(self.save_dir, exist_ok=True)
         # Save if dir is set
         if self.save_dir is not None:
             path = f"{self.save_dir}/{task}{epoch}{title.replace(' ', '_')}.png"
