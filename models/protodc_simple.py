@@ -35,6 +35,7 @@ class ProtoDC(ContinualModel):
                             help='Temperature for prototype similarity.')
         return parser
 
+
     def __init__(self, backbone, loss, args, transform, dataset=None):
         super().__init__(backbone, loss, args, transform, dataset=dataset)
 
@@ -191,7 +192,7 @@ class ProtoDC(ContinualModel):
 
         for cls in classes:
             cls_idxs = (target == cls).nonzero(as_tuple=True)[0]
-            print(f"class {cls}: {len(cls_idxs)}")
+            # print(f"class {cls}: {len(cls_idxs)}")
             if len(cls_idxs) < n_query + 1:
                 raise ValueError(f"Not enough samples for class {cls.item()}: need > {n_query}, got {len(cls_idxs)}")
             query_idxs.append(cls_idxs[-n_query:])
@@ -225,6 +226,59 @@ class ProtoDC(ContinualModel):
 
         return loss, acc
 
+    def contrastive_loss(self, input, target, temperature=0.1):
+        """
+        Compute a supervised contrastive learning loss (InfoNCE).
+
+        Args:
+            input (Tensor): Model embeddings of shape [N, D]
+            target (Tensor): Ground truth labels of shape [N]
+            temperature (float): Temperature scaling factor for softmax
+
+        Returns:
+            Tuple[Tensor, Tensor]: (loss, accuracy)
+        """
+        classes = torch.unique(target)
+        n_classes = len(classes)
+
+        # Normalize embeddings to use cosine similarity
+        input = F.normalize(input, dim=1)
+
+        N, D = input.shape
+        sim_matrix = torch.matmul(input, input.T)  # [N, N] pairwise similarities
+        sim_matrix = sim_matrix / temperature
+
+        # Mask to ignore self-similarity
+        self_mask = torch.eye(N, device=input.device).bool()
+
+        # Positive mask: 1 if same class, 0 otherwise
+        target = target.contiguous()
+        positive_mask = target.unsqueeze(0) == target.unsqueeze(1)  # [N, N]
+        positive_mask = positive_mask & ~self_mask  # remove self-comparison
+
+        # For each sample, the denominator is similarity with all others
+        # Only positives contribute to the numerator
+        exp_sim = torch.exp(sim_matrix) * (~self_mask)  # exclude self
+        log_prob = sim_matrix - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-12)
+
+        # Compute loss: average over positives
+        # Only consider valid positives (same class pairs)
+        loss = -(log_prob * positive_mask).sum(dim=1) / (positive_mask.sum(dim=1) + 1e-12)
+        loss = loss.mean()
+
+        # Accuracy: treat nearest neighbor as prediction
+        sim_matrix.masked_fill_(self_mask, -1e9)  # ignore self
+        preds = sim_matrix.argmax(dim=1)
+        acc = (target[preds] == target).float().mean()
+
+        for cls in classes:
+            cls_support = input[(target == cls)]
+
+            # Update stored prototypes for future use
+            self.class_prototypes[cls.item()] = cls_support.mean(0).detach()
+            self.seen_classes.add(cls.item())
+
+        return loss, acc
 
     def generate_synthetic_prototypes(self):
         """Generate synthetic prototypical data for condensation."""
@@ -270,7 +324,9 @@ class ProtoDC(ContinualModel):
         # print(f"image_syn: {self.image_syn}")
 
 
-    def optimize_proto_exemplar(self, image_syn, label_syn, target_features=None):
+    def optimize_proto_exemplar(self, image_syn, label_syn,
+                                inputs = None, labels = None,
+                                target_features=None):
         """
         Optimize synthetic prototypes to match target features.
 
@@ -299,8 +355,13 @@ class ProtoDC(ContinualModel):
                 continue
 
             # Create optimizer for this specific synthetic image
-            optimizer_img = SGD([syn_img], lr=self.args.lr_img, momentum=0.5)
-            target_proto = self.class_prototypes[class_id]
+            optimizer_img = Adam([syn_img], lr=self.args.lr_img)
+
+            # target_proto = self.class_prototypes[class_id]
+            # FIXME inputs -> rep. -> target_proto
+            outputs, features = self.net(inputs, returnt = 'both')
+            cls_support = features[(labels == class_id)]
+            target_proto = cls_support.mean(0)
 
             # Optimize this synthetic exemplar over single step
             optimizer_img.zero_grad()
@@ -416,7 +477,6 @@ class ProtoDC(ContinualModel):
         """
 
         if epoch <= self.n_epoch_model -1:
-            # print(f"Update Model epoch:{epoch} / epoch_model: {self.n_epoch_model}")
             # Prototype + Network Optimizer
             self.opt.zero_grad()
 
@@ -427,7 +487,8 @@ class ProtoDC(ContinualModel):
             vanilla_loss = self.loss(outputs, labels)
 
             # ProtoNet Loss (prototypical network loss)
-            proto_loss, _ = self.prototypical_loss(features, labels, 20)
+            proto_loss, _ = self.contrastive_loss(features, labels, self.args.proto_temp)
+            # proto_loss, _ = self.prototypical_loss(features, labels, 20)
             # proto_loss = self.compute_prototype_loss(features, labels)
 
             # Combined loss
@@ -459,7 +520,8 @@ class ProtoDC(ContinualModel):
             self.generate_synthetic_prototypes()
             if self.image_syn:  # Only if we have synthetic prototypes
                 self.optimize_proto_exemplar(image_syn = self.image_syn,
-                                             label_syn = self.label_syn
+                                             label_syn = self.label_syn,
+                                             inputs = inputs, labels= labels,
                                              )
 
             return 0
@@ -479,7 +541,7 @@ class ProtoDC(ContinualModel):
             pass
         else:
             print(f"end epoch // epoch: {epoch} // e_model: {self.n_epoch_model}")
-            if epoch % 25 != 0:
+            if epoch % 10 != 0:
                 pass
             else:
                 # 1. Extract embeddings + labels from full dataset
@@ -515,6 +577,7 @@ class ProtoDC(ContinualModel):
 
                     if len(class_features) > 0:
                         proto = class_features.mean(dim=0)  # centroid of features
+                        print(f"Difference train-test proto {class_id}: {torch.norm(self.class_prototypes[class_id].cpu() - proto)}")
                         prototypes.append(proto)
                         predictions_onehot = torch.nn.functional.one_hot(torch.tensor(class_id), num_classes=num_classes).float()
                         predictions.append(predictions_onehot)
@@ -550,7 +613,7 @@ class ProtoDC(ContinualModel):
                     predictions=predictions,
                     syn_proto = syn_protos,
                     method="tsne",  # or "pca"
-                    title="t-SNE on Full Dataset"
+                    title=f"t-SNE of t{self._current_task}e{epoch} on full dataset"
                 )
                 # plt.savefig(f"task{self._current_task}-epoch{epoch}.png")  # saves to file
                 # plt.close()
