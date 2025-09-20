@@ -9,11 +9,14 @@ import torch.nn.functional as F
 from torch.optim import SGD, Adam
 from argparse import ArgumentParser
 
+from models.protocore_utils.proto_utils import AugmentationMixer
 from models.protocore_utils.protocore_loss import euclidean_dist
 from models.protocore_utils.proto_visualize import Visualizer
 from models.utils.continual_model import ContinualModel
 from utils.args import add_rehearsal_args, ArgumentParser
 from utils.buffer import Buffer
+
+import os
 
 class ProtoDC(ContinualModel):
     """Continual learning via Prototype Set Condensation."""
@@ -31,8 +34,16 @@ class ProtoDC(ContinualModel):
                             help='Learning rate for synthetic images.')
         parser.add_argument('--proto_steps', type=int, default=1,
                             help='Number of steps for prototype optimization.')
+        parser.add_argument('--augment_flag', type=int, default=0,
+                            help='Flag for augmentation.')
         parser.add_argument('--proto_temp', type=float, default=0.1,
                             help='Temperature for prototype similarity.')
+        parser.add_argument('--patience', type=int, default=10,
+                            help='Number of epochs to wait for improvement.')
+        parser.add_argument('--min_delta', type=float, default=1e-4,
+                            help='Minimum improvement to be considered as progress.')
+        parser.add_argument('--proto_method', type=str, default='contrastive',
+                            help='Loss function for ProtoNet method.')
         return parser
 
 
@@ -52,6 +63,8 @@ class ProtoDC(ContinualModel):
         self.proto_temp = args.proto_temp
         self.proto_steps = args.proto_steps
 
+        self.augmentation = AugmentationMixer(device="cuda")
+
         # Get dataset properties
         self.num_classes = dataset.N_CLASSES_PER_TASK if dataset else 10
         self.input_shape = getattr(dataset, 'INPUT_SHAPE', (3, 32, 32))
@@ -69,6 +82,15 @@ class ProtoDC(ContinualModel):
         # TODO Initialize learning epochs/iters for model / synthetic data
         self.n_epoch_model = self.args.n_epochs // 2
         self.n_epoch_data = self.args.n_epochs - self.n_epoch_model
+
+        if not hasattr(self, "best_loss"):
+            print("Best Loss Init")
+            self.best_loss = float("inf")
+            self.patience_counter = 0
+
+            save_model_dir = f"checkpoints/best_model"
+            os.makedirs(save_model_dir, exist_ok=True)  # Create folder if it does not exist
+            self.best_model_path = os.path.join(save_model_dir, "best_model.pt")
 
     def extract_features(self, x):
         """Extract feature representations from the network."""
@@ -227,6 +249,60 @@ class ProtoDC(ContinualModel):
         return loss, acc
 
     def contrastive_loss(self, input, target, temperature=0.1):
+        """
+        Compute a supervised contrastive learning loss (InfoNCE).
+
+        Args:
+            input (Tensor): Model embeddings of shape [N, D]
+            target (Tensor): Ground truth labels of shape [N]
+            temperature (float): Temperature scaling factor for softmax
+
+        Returns:
+            Tuple[Tensor, Tensor]: (loss, accuracy)
+        """
+        classes = torch.unique(target)
+        n_classes = len(classes)
+
+        # Normalize embeddings to use cosine similarity
+        input = F.normalize(input, dim=1)
+
+        N, D = input.shape
+        sim_matrix = torch.matmul(input, input.T)  # [N, N] pairwise similarities
+        sim_matrix = sim_matrix / temperature
+
+        # Mask to ignore self-similarity
+        self_mask = torch.eye(N, device=input.device).bool()
+
+        # Positive mask: 1 if same class, 0 otherwise
+        target = target.contiguous()
+        positive_mask = target.unsqueeze(0) == target.unsqueeze(1)  # [N, N]
+        positive_mask = positive_mask & ~self_mask  # remove self-comparison
+
+        # For each sample, the denominator is similarity with all others
+        # Only positives contribute to the numerator
+        exp_sim = torch.exp(sim_matrix) * (~self_mask)  # exclude self
+        log_prob = sim_matrix - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-12)
+
+        # Compute loss: average over positives
+        # Only consider valid positives (same class pairs)
+        loss = -(log_prob * positive_mask).sum(dim=1) / (positive_mask.sum(dim=1) + 1e-12)
+        loss = loss.mean()
+
+        # Accuracy: treat nearest neighbor as prediction
+        sim_matrix.masked_fill_(self_mask, -1e9)  # ignore self
+        preds = sim_matrix.argmax(dim=1)
+        acc = (target[preds] == target).float().mean()
+
+        for cls in classes:
+            cls_support = input[(target == cls)]
+
+            # Update stored prototypes for future use
+            self.class_prototypes[cls.item()] = cls_support.mean(0).detach()
+            self.seen_classes.add(cls.item())
+
+        return loss, acc
+
+    def hyperbolic_contrastive_loss(self, input, target, temperature=0.1):
         """
         Compute a supervised contrastive learning loss (InfoNCE).
 
@@ -473,8 +549,18 @@ class ProtoDC(ContinualModel):
             - First n_epoch // 2 steps:
                 Train Model
             - Last n_epoch // 2 steps:
-                Free Model + Train Data
+                Freeze Model + Train Data
         """
+
+        if self.args.augment_flag == 1:
+            inputs, labels = self.augmentation(inputs, labels)
+        elif self.args.augment_flag == 2:
+            inputs = torch.cat([inputs] + [not_aug_inputs], dim=0)
+            labels = labels.repeat(1 + 1)
+        else:
+            inputs, labels = inputs, labels
+
+        # print(f"not aug: {not_aug_inputs.size()} | aug: {inputs.size()}")
 
         if epoch <= self.n_epoch_model -1:
             # Prototype + Network Optimizer
@@ -487,9 +573,12 @@ class ProtoDC(ContinualModel):
             vanilla_loss = self.loss(outputs, labels)
 
             # ProtoNet Loss (prototypical network loss)
-            proto_loss, _ = self.contrastive_loss(features, labels, self.args.proto_temp)
-            # proto_loss, _ = self.prototypical_loss(features, labels, 20)
-            # proto_loss = self.compute_prototype_loss(features, labels)
+            if self.args.proto_method == 'contrastive':
+                proto_loss, _ = self.contrastive_loss(features, labels, self.args.proto_temp)
+            elif self.args.proto_method == 'prototypical':
+                proto_loss, _ = self.prototypical_loss(features, labels, 20)
+            else:
+                proto_loss = self.compute_prototype_loss(features, labels)
 
             # Combined loss
             loss = (1-self.args.alpha) * vanilla_loss + self.args.alpha * proto_loss
@@ -541,8 +630,117 @@ class ProtoDC(ContinualModel):
             pass
         else:
             print(f"end epoch // epoch: {epoch} // e_model: {self.n_epoch_model}")
-            if epoch % 10 != 0:
-                pass
+            if epoch % 25 != 0:
+                """ ========== Early Stopping & Best Model ========== """
+                # 1. Extract embeddings + labels from full dataset
+                all_features, all_labels = [], []
+                with torch.no_grad():
+                    for k, test_loader in enumerate(dataset.test_loaders):
+                        for inputs, targets in test_loader:
+                            inputs, targets = inputs.to(self.net.device), targets.to(self.net.device)
+                            _, feats = self.net(inputs, returnt='both')
+                            all_features.append(feats.cpu())
+                            all_labels.append(targets.cpu())
+
+                all_features = torch.cat(all_features, dim=0)
+                all_labels = torch.cat(all_labels, dim=0)
+
+                # ===== ProtoNet Loss =====
+                if self.args.proto_method == 'contrastive':
+                    proto_loss, _ = self.contrastive_loss(all_features, all_labels, self.args.proto_temp)
+                elif self.args.proto_method == 'prototypical':
+                    proto_loss, _ = self.prototypical_loss(all_features, all_labels, 20)
+                else:
+                    proto_loss = self.compute_prototype_loss(all_features, all_labels)
+
+                # ===== Early Stopping Check =====
+                current_loss = proto_loss
+
+                if current_loss < self.best_loss - self.args.min_delta:
+                    # Improvement detected
+                    self.best_loss = current_loss
+                    self.patience_counter = 0
+
+                    # Save the current best model
+                    torch.save({
+                        'epoch': epoch,
+                        'model_state_dict': self.net.state_dict(),
+                        'optimizer_state_dict': self.opt.state_dict(),
+                        'loss': current_loss
+                    }, self.best_model_path)
+
+                    print(f"[INFO] Best model saved at epoch {epoch} with loss {current_loss:.4f}")
+
+                    # ===== Visualize the best case =====
+                    # 1. Extract embeddings + labels from full dataset
+                    all_features, all_labels = [], []
+                    with torch.no_grad():
+                        for k, test_loader in enumerate(dataset.test_loaders):
+                            for inputs, targets in test_loader:
+                                inputs, targets = inputs.to(self.net.device), targets.to(self.net.device)
+                                _, feats = self.net(inputs, returnt='both')
+                                all_features.append(feats.cpu())
+                                all_labels.append(targets.cpu())
+
+                    all_features = torch.cat(all_features, dim=0)
+                    all_labels = torch.cat(all_labels, dim=0)
+
+                    syn_protos = []
+                    prototypes = []
+                    predictions = []
+                    num_classes = len(self.seen_classes)
+                    for class_id in self.seen_classes:
+                        class_mask = (all_labels == class_id)
+                        class_features = all_features[class_mask]
+
+                        if len(class_features) > 0:
+                            proto = class_features.mean(dim=0)  # centroid of features
+                            print(
+                                f"Difference train-test proto {class_id}: {torch.norm(self.class_prototypes[class_id].cpu() - proto)}")
+                            prototypes.append(proto)
+                            predictions_onehot = torch.nn.functional.one_hot(torch.tensor(class_id),
+                                                                             num_classes=num_classes).float()
+                            predictions.append(predictions_onehot)
+                        else:
+                            # if no samples of this class are present
+                            prototypes.append(torch.zeros(all_features.size(1)))
+                            predictions_onehot = torch.nn.functional.one_hot(torch.tensor(class_id),
+                                                                             num_classes=num_classes).float()
+                            predictions.append(predictions_onehot)
+
+                        if class_id in self.buf_syn_img:
+                            if self.buf_syn_img[class_id] is not None:
+                                _, feats = self.net(self.buf_syn_img[class_id], returnt='both')
+                                syn_protos.append(feats.squeeze(0).cpu())
+                            else:
+                                syn_protos.append(torch.zeros(all_features.size(1)))
+                        else:
+                            syn_protos.append(torch.zeros(all_features.size(1)))
+
+                    prototypes = torch.stack(prototypes, dim=0)  # [num_classes, D]
+                    predictions = torch.stack(predictions, dim=0)
+                    syn_protos = torch.stack(syn_protos, dim=0)  # [num_classes, D]
+
+                    # 3. Visualize with your method
+                    fig = self.visualizer.visualize_episode(
+                        embeddings=all_features,
+                        labels=all_labels,
+                        task=self._current_task,
+                        epoch=epoch,
+                        prototypes=prototypes,
+                        predictions=predictions,
+                        syn_proto=syn_protos,
+                        method="tsne",  # or "pca"
+                        title=f"Best case: t{self._current_task}e{epoch}"
+                    )
+                else:
+                    # No improvement
+                    self.patience_counter += 1
+                    if self.patience_counter >= self.args.patience:
+                        print(f"[Early Stopping] No improvement for {self.args.patience} epochs.")
+                        stop_training = True
+
+                """ ========== Early Stopping & Best Model ========== """
             else:
                 # 1. Extract embeddings + labels from full dataset
                 all_features, all_labels = [], []
@@ -556,16 +754,6 @@ class ProtoDC(ContinualModel):
 
                 all_features = torch.cat(all_features, dim=0)
                 all_labels = torch.cat(all_labels, dim=0)
-
-                pro_parts = []
-                pre_parts = []
-                # for class_id in self.seen_classes:
-                #     buf_prediction , buf_proto = self.net(self.buf_syn_img[class_id], returnt='both') # Single exemplar feature
-                #     pre_parts.append(buf_prediction.detach().cpu())
-                #     pro_parts.append(buf_proto.cpu())
-
-                # prototypes = torch.cat(pro_parts, dim=0)
-                # predictions = torch.cat(pre_parts, dim=0)
 
                 syn_protos = []
                 prototypes = []
@@ -588,15 +776,12 @@ class ProtoDC(ContinualModel):
                         predictions.append(predictions_onehot)
 
                     if class_id in self.buf_syn_img:
-                        print("IN")
                         if self.buf_syn_img[class_id] is not None:
                             _, feats = self.net(self.buf_syn_img[class_id], returnt='both')
                             syn_protos.append(feats.squeeze(0).cpu())
                         else:
-                            print("None1")
                             syn_protos.append(torch.zeros(all_features.size(1)))
                     else:
-                        print("None2")
                         syn_protos.append(torch.zeros(all_features.size(1)))
 
                 prototypes = torch.stack(prototypes, dim=0)  # [num_classes, D]
