@@ -10,7 +10,7 @@ from torch.optim import SGD, Adam
 from argparse import ArgumentParser
 
 from models.protocore_utils.proto_utils import AugmentationMixer
-from models.protocore_utils.protocore_loss import euclidean_dist
+from models.protocore_utils.protocore_loss import euclidean_dist, HyperbolicContrastiveLoss
 from models.protocore_utils.proto_visualize import Visualizer
 from models.utils.continual_model import ContinualModel
 from utils.args import add_rehearsal_args, ArgumentParser
@@ -40,10 +40,12 @@ class ProtoDC(ContinualModel):
                             help='Temperature for prototype similarity.')
         parser.add_argument('--patience', type=int, default=10,
                             help='Number of epochs to wait for improvement.')
+        parser.add_argument('--spc', type=int, default=1,
+                            help='Number of sample per class.')
         parser.add_argument('--min_delta', type=float, default=1e-4,
                             help='Minimum improvement to be considered as progress.')
-        parser.add_argument('--proto_method', type=str, default='contrastive',
-                            help='Loss function for ProtoNet method.')
+        parser.add_argument('--proto_method', type=str, default='hyperbolic',
+                            help='contrastive, prototypical, hyperbolic.')
         return parser
 
 
@@ -62,6 +64,7 @@ class ProtoDC(ContinualModel):
 
         self.proto_temp = args.proto_temp
         self.proto_steps = args.proto_steps
+        self.spc = args.spc
 
         self.augmentation = AugmentationMixer(device="cuda")
 
@@ -78,6 +81,8 @@ class ProtoDC(ContinualModel):
         # Initialize learnable synthetic prototypical exemplars:
         self.image_syn = []
         self.label_syn = []
+
+        self.hyperbolic_cl = HyperbolicContrastiveLoss()
 
         # TODO Initialize learning epochs/iters for model / synthetic data
         self.n_epoch_model = self.args.n_epochs // 2
@@ -302,60 +307,6 @@ class ProtoDC(ContinualModel):
 
         return loss, acc
 
-    def hyperbolic_contrastive_loss(self, input, target, temperature=0.1):
-        """
-        Compute a supervised contrastive learning loss (InfoNCE).
-
-        Args:
-            input (Tensor): Model embeddings of shape [N, D]
-            target (Tensor): Ground truth labels of shape [N]
-            temperature (float): Temperature scaling factor for softmax
-
-        Returns:
-            Tuple[Tensor, Tensor]: (loss, accuracy)
-        """
-        classes = torch.unique(target)
-        n_classes = len(classes)
-
-        # Normalize embeddings to use cosine similarity
-        input = F.normalize(input, dim=1)
-
-        N, D = input.shape
-        sim_matrix = torch.matmul(input, input.T)  # [N, N] pairwise similarities
-        sim_matrix = sim_matrix / temperature
-
-        # Mask to ignore self-similarity
-        self_mask = torch.eye(N, device=input.device).bool()
-
-        # Positive mask: 1 if same class, 0 otherwise
-        target = target.contiguous()
-        positive_mask = target.unsqueeze(0) == target.unsqueeze(1)  # [N, N]
-        positive_mask = positive_mask & ~self_mask  # remove self-comparison
-
-        # For each sample, the denominator is similarity with all others
-        # Only positives contribute to the numerator
-        exp_sim = torch.exp(sim_matrix) * (~self_mask)  # exclude self
-        log_prob = sim_matrix - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-12)
-
-        # Compute loss: average over positives
-        # Only consider valid positives (same class pairs)
-        loss = -(log_prob * positive_mask).sum(dim=1) / (positive_mask.sum(dim=1) + 1e-12)
-        loss = loss.mean()
-
-        # Accuracy: treat nearest neighbor as prediction
-        sim_matrix.masked_fill_(self_mask, -1e9)  # ignore self
-        preds = sim_matrix.argmax(dim=1)
-        acc = (target[preds] == target).float().mean()
-
-        for cls in classes:
-            cls_support = input[(target == cls)]
-
-            # Update stored prototypes for future use
-            self.class_prototypes[cls.item()] = cls_support.mean(0).detach()
-            self.seen_classes.add(cls.item())
-
-        return loss, acc
-
     def generate_synthetic_prototypes(self):
         """Generate synthetic prototypical data for condensation."""
         device = next(self.net.parameters()).device
@@ -373,7 +324,7 @@ class ProtoDC(ContinualModel):
 
             for class_id in self.seen_classes:
                 # Create synthetic image for this class
-                syn_img = torch.randn(size=(1, self.channel, self.im_size[0], self.im_size[1]),
+                syn_img = torch.randn(size=(self.spc, self.channel, self.im_size[0], self.im_size[1]),
                                       dtype=torch.float, requires_grad=True, device=device)
                 self.image_syn.append(syn_img)
 
@@ -449,7 +400,7 @@ class ProtoDC(ContinualModel):
 
             # syn_features has shape (1, feature_dim) - features from the single exemplar
             # The exemplar itself IS the prototype, so we squeeze the batch dimension
-            syn_proto = syn_features.squeeze(0)  # Remove batch dimension: (feature_dim,)
+            syn_proto = syn_features.mean(0)  # Remove batch dimension: (feature_dim,)
 
             # Ensure target prototype has same shape
             if target_proto.dim() != syn_proto.dim():
@@ -577,6 +528,16 @@ class ProtoDC(ContinualModel):
                 proto_loss, _ = self.contrastive_loss(features, labels, self.args.proto_temp)
             elif self.args.proto_method == 'prototypical':
                 proto_loss, _ = self.prototypical_loss(features, labels, 20)
+            elif self.args.proto_method == 'hyperbolic':
+                proto_loss = self.hyperbolic_cl(features, labels)
+                classes = torch.unique(labels)
+
+                for cls in classes:
+                    cls_support = features[(labels == cls)]
+
+                    # Update stored prototypes for future use
+                    self.class_prototypes[cls.item()] = cls_support.mean(0).detach()
+                    self.seen_classes.add(cls.item())
             else:
                 proto_loss = self.compute_prototype_loss(features, labels)
 
@@ -713,9 +674,9 @@ class ProtoDC(ContinualModel):
                                 _, feats = self.net(self.buf_syn_img[class_id], returnt='both')
                                 syn_protos.append(feats.squeeze(0).cpu())
                             else:
-                                syn_protos.append(torch.zeros(all_features.size(1)))
+                                syn_protos.append(torch.zeros(self.spc, all_features.size(1)))
                         else:
-                            syn_protos.append(torch.zeros(all_features.size(1)))
+                            syn_protos.append(torch.zeros(self.spc, all_features.size(1)))
 
                     prototypes = torch.stack(prototypes, dim=0)  # [num_classes, D]
                     predictions = torch.stack(predictions, dim=0)
@@ -780,9 +741,9 @@ class ProtoDC(ContinualModel):
                             _, feats = self.net(self.buf_syn_img[class_id], returnt='both')
                             syn_protos.append(feats.squeeze(0).cpu())
                         else:
-                            syn_protos.append(torch.zeros(all_features.size(1)))
+                            syn_protos.append(torch.zeros(self.spc, all_features.size(1)))
                     else:
-                        syn_protos.append(torch.zeros(all_features.size(1)))
+                        syn_protos.append(torch.zeros(self.spc, all_features.size(1)))
 
                 prototypes = torch.stack(prototypes, dim=0)  # [num_classes, D]
                 predictions = torch.stack(predictions, dim=0)
