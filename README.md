@@ -73,6 +73,11 @@ To run the model with the best hyperparameters, use the `--model_config=best` ar
 python main.py --model derpp --dataset seq-cifar100 --model_config best
 ```
 
+To run the model ProtoDC: 
+```bash
+python main.py --model protodc --dataset seq-cifar100 --alpha 0.95 --beta 0.5 --lr 0.2 --lr_img 0.2 --batch_size 1000 --n_epochs 2 --buffer_size 1000 --optim_wd 0 --optimizer adam --proto_temp 1.0 --proto_method contrastive --spc 3  
+```
+
  > NOTE: the `--model_config` argument will look for a file `<model_name>.yaml` in the `models/configs/` folder. This file should contain the hyperparameters for the best configuration of the model. You can find more information in [the documentation](https://aimagelab.github.io/mammoth/models/model_arguments.html#model-configurations-and-best-arguments).
 
 ### Build a new model

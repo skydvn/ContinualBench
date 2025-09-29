@@ -1,9 +1,17 @@
+import os
+
+import torch
+import torchvision
+from torch.utils.data import DataLoader
+import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
-import torch
-import numpy as np
-import os
+import umap
+from typing import Tuple, Optional
+import warnings
+warnings.filterwarnings('ignore')
 
 
 class Visualizer:
@@ -356,3 +364,62 @@ class HyperbolicVisualizer:
             print(f"[HyperbolicVisualizer] Saved figure to {path}")
 
         return fig
+
+
+class HyperbolicUMAP:
+    """Hyperbolic UMAP implementation using Poincaré ball model"""
+
+    def __init__(self, n_components: int = 2, n_neighbors: int = 15,
+                 min_dist: float = 0.1, metric: str = 'euclidean',
+                 random_state: int = 42):
+        self.n_components = n_components
+        self.n_neighbors = n_neighbors
+        self.min_dist = min_dist
+        self.metric = metric
+        self.random_state = random_state
+        self.embedding_ = None
+
+    def _euclidean_to_poincare(self, X: np.ndarray) -> np.ndarray:
+        """Convert Euclidean coordinates to Poincaré ball coordinates"""
+        # Normalize to unit ball first
+        X_norm = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-8)
+
+        # Apply stereographic projection to Poincaré ball
+        # Scale down to ensure points are inside unit ball
+        scale_factor = 0.95
+        return X_norm * scale_factor
+
+    def _poincare_distance(self, x: np.ndarray, y: np.ndarray) -> float:
+        """Compute Poincaré distance between two points"""
+        diff = x - y
+        diff_norm_sq = np.sum(diff ** 2)
+        x_norm_sq = np.sum(x ** 2)
+        y_norm_sq = np.sum(y ** 2)
+
+        numerator = 2 * diff_norm_sq
+        denominator = (1 - x_norm_sq) * (1 - y_norm_sq)
+
+        # Avoid division by zero and numerical issues
+        denominator = np.maximum(denominator, 1e-8)
+
+        return np.arccosh(1 + numerator / denominator)
+
+    def fit_transform(self, X: np.ndarray) -> np.ndarray:
+        """Fit hyperbolic UMAP and return transformed data"""
+        print("Applying standard UMAP...")
+        # First apply standard UMAP
+        standard_umap = umap.UMAP(
+            n_components=self.n_components,
+            n_neighbors=self.n_neighbors,
+            min_dist=self.min_dist,
+            metric=self.metric,
+            random_state=self.random_state
+        )
+
+        euclidean_embedding = standard_umap.fit_transform(X)
+
+        print("Converting to hyperbolic space...")
+        # Convert to hyperbolic (Poincaré ball) coordinates
+        self.embedding_ = self._euclidean_to_poincare(euclidean_embedding)
+
+        return self.embedding_

@@ -60,14 +60,17 @@ def project2cone2(solver, gradient, memories, margin=0.5, eps=1e-3):
         input:  memories, (t * p)-vector
         output: x, p-vector
     """
+    print(f"memories: {memories.size()} | gradient: {gradient.size()}")
     memories_np = memories.cpu().t().double().numpy()
     gradient_np = gradient.cpu().contiguous().view(-1).double().numpy()
+    print(f"memories_np: {np.shape(memories_np)} | memories_np: {np.shape(gradient_np)}")
     n_rows = memories_np.shape[0]
     self_prod = np.dot(memories_np, memories_np.transpose())
     self_prod = 0.5 * (self_prod + self_prod.transpose()) + np.eye(n_rows) * eps
     grad_prod = np.dot(memories_np, gradient_np) * -1
     G = np.eye(n_rows)
     h = np.zeros(n_rows) + margin
+    print(f"P: {np.shape(self_prod)} | q: {np.shape(grad_prod)} | G: {np.shape(G)} | h: {np.shape(h)}")
     v = solver.solve_qp(self_prod, grad_prod, G, h)[0]
     x = np.dot(v, memories_np) + gradient_np
     gradient.copy_(torch.from_numpy(x).view(-1, 1))

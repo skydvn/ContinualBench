@@ -11,7 +11,7 @@ from argparse import ArgumentParser
 
 from models.protocore_utils.proto_utils import AugmentationMixer
 from models.protocore_utils.protocore_loss import euclidean_dist, HyperbolicContrastiveLoss
-from models.protocore_utils.proto_visualize import Visualizer
+from models.protocore_utils.proto_visualize import Visualizer, HyperbolicVisualizer
 from models.utils.continual_model import ContinualModel
 from utils.args import add_rehearsal_args, ArgumentParser
 from utils.buffer import Buffer
@@ -53,7 +53,8 @@ class ProtoDC(ContinualModel):
         super().__init__(backbone, loss, args, transform, dataset=dataset)
 
         note = "syn_proto"
-        self.visualizer = Visualizer(save_dir = f"./tsne/{note}")
+        # self.visualizer = Visualizer(save_dir = f"./tsne/{note}")
+        self.visualizer = HyperbolicVisualizer(save_dir= f"./tsne/{note}")
 
         # Define Buffer
         self.buffer = Buffer(self.args.buffer_size)
@@ -692,7 +693,18 @@ class ProtoDC(ContinualModel):
                         predictions=predictions,
                         syn_proto=syn_protos,
                         method="tsne",  # or "pca"
-                        title=f"Best case: t{self._current_task}e{epoch}"
+                        title=f"Best TSNE: t{self._current_task}e{epoch}"
+                    )
+                    fig = self.visualizer.visualize_episode(
+                        embeddings=all_features,
+                        labels=all_labels,
+                        task=self._current_task,
+                        epoch=epoch,
+                        prototypes=prototypes,
+                        predictions=predictions,
+                        syn_proto=syn_protos,
+                        method="humap",  # or "pca"
+                        title=f"Best HUMAP: t{self._current_task}e{epoch}"
                     )
                 else:
                     # No improvement
@@ -758,8 +770,19 @@ class ProtoDC(ContinualModel):
                     prototypes=prototypes,
                     predictions=predictions,
                     syn_proto = syn_protos,
-                    method="tsne",  # or "pca"
-                    title=f"t-SNE of t{self._current_task}e{epoch} on full dataset"
+                    method="tsne",  # or "pca" or "tsne"
+                    title=f"t-SNE of t{self._current_task}e{epoch}"
+                )
+                fig = self.visualizer.visualize_episode(
+                    embeddings=all_features,
+                    labels=all_labels,
+                    task=self._current_task,
+                    epoch=epoch,
+                    prototypes=prototypes,
+                    predictions=predictions,
+                    syn_proto=syn_protos,
+                    method="humap",  # or "pca" or "tsne"
+                    title=f"HUMAP of t{self._current_task}e{epoch}"
                 )
                 # plt.savefig(f"task{self._current_task}-epoch{epoch}.png")  # saves to file
                 # plt.close()
