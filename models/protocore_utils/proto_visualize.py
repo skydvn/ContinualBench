@@ -21,7 +21,7 @@ class Visualizer:
     def visualize_episode(self, embeddings, labels, task, epoch,
                           prototypes=None, predictions=None, syn_proto = None,
                           method="tsne", title="Episode Visualization"):
-        """
+        """2
         Visualize embeddings + prototypes in 2D, coloring prototypes by predicted class.
 
         Args:
