@@ -46,7 +46,8 @@ class Visualizer:
 
         # Dimensionality reduction
         if method.lower() == "tsne":
-            reducer = TSNE(n_components=2, init="pca", random_state=42)
+            # reducer = TSNE(n_components=2, init="pca", random_state=42)
+            reducer = TSNE(n_components=2, random_state=42)
         else:
             reducer = PCA(n_components=2)
 
@@ -201,7 +202,8 @@ class HyperbolicVisualizer:
             is_hyperbolic = True
 
         elif method.lower() == "tsne":
-            reducer = TSNE(n_components=2, init="pca", random_state=42)
+            # reducer = TSNE(n_components=2, init="pca", random_state=42)
+            reducer = TSNE(n_components=2, random_state=42)
             Z = reducer.fit_transform(X)
             is_hyperbolic = False
 
@@ -229,7 +231,8 @@ class HyperbolicVisualizer:
                 # Use standard approach for other methods
                 all_concat = np.vstack([X, P])
                 if method.lower() == "tsne":
-                    reducer = TSNE(n_components=2, init="pca", random_state=42)
+                    # reducer = TSNE(n_components=2, init="pca", random_state=42)
+                    reducer = TSNE(n_components=2, random_state=42)
                 else:
                     reducer = PCA(n_components=2, random_state=42)
                 all_Z = reducer.fit_transform(all_concat)
@@ -249,45 +252,52 @@ class HyperbolicVisualizer:
                     label="Prototypes", alpha=0.9
                 )
 
-        # Handle synthetic prototypes (individual points)
-        if P_syn is not None:
-            P_syn_flat = P_syn.reshape(-1, P_syn.shape[-1])  # [C*K, D]
-
-            if method.lower() == "humap":
-                # Transform synthetic prototypes
-                P_syn_reduced = pca.transform(P_syn_flat)
-                all_data = np.vstack([X_reduced, P_syn_reduced])
-                hyp_umap_all = HyperbolicUMAP(n_components=2, n_neighbors=15, min_dist=0.1, random_state=42)
-                all_Z = hyp_umap_all.fit_transform(all_data)
-                PZ_syn = all_Z[-P_syn_flat.shape[0]:]
+            # Handle synthetic prototypes (individual points)
+            if np.ndim(P_syn) < 3:
+                pass
             else:
-                all_concat = np.vstack([X, P_syn_flat])
-                if method.lower() == "tsne":
-                    reducer = TSNE(n_components=2, init="pca", random_state=42)
-                else:
-                    reducer = PCA(n_components=2, random_state=42)
-                all_Z = reducer.fit_transform(all_concat)
-                PZ_syn = all_Z[-P_syn_flat.shape[0]:]
+                if P_syn is not None:
+                    P_syn_flat = P_syn.reshape(-1, P_syn.shape[-1])  # [C*K, D]
 
-            repeat_count = P_syn.shape[1]  # K
-            if P_pred is not None:
-                P_pred_expanded = np.repeat(P_pred, repeat_count)
-                ax.scatter(
-                    PZ_syn[:, 0], PZ_syn[:, 1],
-                    c=P_pred_expanded, cmap="tab20",
-                    marker='*', s=150, edgecolor="k", linewidth=1.0,
-                    label="Synthetic Prototypes", alpha=0.8
-                )
-            else:
-                ax.scatter(
-                    PZ_syn[:, 0], PZ_syn[:, 1],
-                    c="red", marker='*', s=150, edgecolor="k", linewidth=1.0,
-                    label="Synthetic Prototypes", alpha=0.8
-                )
+                    if method.lower() == "humap":
+                        # Transform synthetic prototypes
+                        P_syn_reduced = pca.transform(P_syn_flat)
+                        all_data = np.vstack([X_reduced, P_syn_reduced])
+                        hyp_umap_all = HyperbolicUMAP(n_components=2, n_neighbors=15, min_dist=0.1, random_state=42)
+                        all_Z = hyp_umap_all.fit_transform(all_data)
+                        PZ_syn = all_Z[-P_syn_flat.shape[0]:]
+                    else:
+                        all_concat = np.vstack([X, P_syn_flat])
+                        if method.lower() == "tsne":
+                            # reducer = TSNE(n_components=2, init="pca", random_state=42)
+                            reducer = TSNE(n_components=2, random_state=42)
+                        else:
+                            reducer = PCA(n_components=2, random_state=42)
+                        all_Z = reducer.fit_transform(all_concat)
+                        PZ_syn = all_Z[-P_syn_flat.shape[0]:]
+
+                    repeat_count = P_syn.shape[1]  # K
+                    if P_pred is not None:
+                        P_pred_expanded = np.repeat(P_pred, repeat_count)
+                        ax.scatter(
+                            PZ_syn[:, 0], PZ_syn[:, 1],
+                            c=P_pred_expanded, cmap="tab20",
+                            marker='*', s=150, edgecolor="k", linewidth=1.0,
+                            label="Synthetic Prototypes", alpha=0.8
+                        )
+                    else:
+                        ax.scatter(
+                            PZ_syn[:, 0], PZ_syn[:, 1],
+                            c="red", marker='*', s=150, edgecolor="k", linewidth=1.0,
+                            label="Synthetic Prototypes", alpha=0.8
+                        )
 
             # Handle synthetic prototypes (mean points)
-            P_syn_mean = P_syn.mean(axis=1)  # [C, D]
-
+            if np.ndim(P_syn) < 3:
+                P_syn_mean = P_syn
+            else:
+                P_syn_mean = P_syn.mean(axis=1)  # [C, D]
+            print(f"X: {np.shape(X)} | P_syn_mean: {np.shape(P_syn_mean)} | P_syn: {np.shape(P_syn)}")
             if method.lower() == "humap":
                 P_syn_mean_reduced = pca.transform(P_syn_mean)
                 all_data = np.vstack([X_reduced, P_syn_mean_reduced])
@@ -297,7 +307,8 @@ class HyperbolicVisualizer:
             else:
                 all_concat = np.vstack([X, P_syn_mean])
                 if method.lower() == "tsne":
-                    reducer = TSNE(n_components=2, init="pca", random_state=42)
+                    # reducer = TSNE(n_components=2, init="pca", random_state=42)
+                    reducer = TSNE(n_components=2, random_state=42)
                 else:
                     reducer = PCA(n_components=2, random_state=42)
                 all_Z = reducer.fit_transform(all_concat)

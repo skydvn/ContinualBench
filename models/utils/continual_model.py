@@ -121,7 +121,7 @@ class ContinualModel(nn.Module):
         if hasattr(self, '_n_classes_current_task'):
             return self._n_classes_current_task
         else:
-            return -1
+            return ContinualModel
 
     @property
     def n_seen_classes(self):

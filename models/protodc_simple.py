@@ -28,6 +28,8 @@ class ProtoDC(ContinualModel):
         add_rehearsal_args(parser)
         parser.add_argument('--alpha', type=float, required=True, default = 0.1,
                             help='Penalty weight for prototype loss.')
+        parser.add_argument('--p_alpha', type=float, required=True, default = 0.1,
+                            help='Penalty weight for prototype loss generator.')
         parser.add_argument('--beta', type=float, required=True, default = 0.1,
                             help='Penalty weight for prototype alignment loss.')
         parser.add_argument('--lr_img', type=float, default=0.5,
@@ -86,7 +88,7 @@ class ProtoDC(ContinualModel):
         self.hyperbolic_cl = HyperbolicContrastiveLoss()
 
         # TODO Initialize learning epochs/iters for model / synthetic data
-        self.n_epoch_model = self.args.n_epochs // 2
+        self.n_epoch_model = 100    # self.args.n_epochs // 2
         self.n_epoch_data = self.args.n_epochs - self.n_epoch_model
 
         if not hasattr(self, "best_loss"):
@@ -445,12 +447,17 @@ class ProtoDC(ContinualModel):
         if not image_syn:
             return
 
+        # Freeze self.net
+        for p in self.net.parameters():
+            p.requires_grad_(False)
+
         print(f"Optimize Exemplar")
         tmp_image_syn = []
         criterion_proto_align = nn.MSELoss()
         # Optimize each synthetic exemplar individually
         for i, (syn_img, syn_label) in enumerate(zip(image_syn, label_syn)):
             class_id = syn_label.item()
+            syn_label = syn_label.repeat(syn_img.size(0))
 
             # Skip if we haven't seen this class yet (no prototype to align to)
             if class_id not in self.class_prototypes:
@@ -472,7 +479,8 @@ class ProtoDC(ContinualModel):
 
             # Forward pass: get features from synthetic image
             # syn_img has shape (1, C, H, W) - single exemplar image
-            syn_features = self.extract_features(syn_img)
+            # syn_features = self.extract_features(syn_img)
+            syn_outputs, syn_features = self.net(syn_img, returnt='both')
 
             # syn_features has shape (1, feature_dim) - features from the single exemplar
             # The exemplar itself IS the prototype, so we squeeze the batch dimension
@@ -487,11 +495,15 @@ class ProtoDC(ContinualModel):
 
             # TODO Align synthetic prototype with stored / target prototype
             align_loss = criterion_proto_align(syn_proto, target_proto)
+            ce_loss = self.loss(syn_outputs, syn_label)
             # keep_loss = criterion_proto_align(syn_proto_1, buff_proto)
-            total_loss = align_loss
+            total_loss = (1 - self.args.p_alpha) * align_loss + self.args.p_alpha * ce_loss
 
             # Backward pass and optimization step
             total_loss.backward()
+            with torch.no_grad():
+                grad_norm = syn_img.grad.norm().item()
+                print(f"[Class {class_id}] Gradient norm: {grad_norm:.6f}")
             optimizer_img.step()
 
             # Optional: Add some constraints to keep synthetic images realistic
@@ -500,10 +512,14 @@ class ProtoDC(ContinualModel):
 
             tmp_image_syn.append(syn_img)
 
-        print(f"average proto loss: {total_loss.item()}")
+        print(f"Proto: 1) total: {total_loss.item()} | align: {align_loss} | ce: {ce_loss}")
 
         # Update buffer with optimized synthetic exemplars
         self._add_synthetic_to_buffer(tmp_image_syn, label_syn)
+
+        # Unfreeze self.net
+        for p in self.net.parameters():
+            p.requires_grad_(True)
 
     def _add_synthetic_to_buffer(self, image_syn, label_syn):
         """
@@ -803,8 +819,8 @@ class ProtoDC(ContinualModel):
                 # 1. Extract embeddings + labels from full dataset
                 all_features, all_labels = [], []
                 with torch.no_grad():
-                    for k, test_loader in enumerate(dataset.test_loaders):
-                    # for k, test_loader in enumerate([dataset.train_loader]):
+                    # for k, test_loader in enumerate(dataset.test_loaders):
+                    for k, test_loader in enumerate([dataset.train_loader]):
                         # for inputs, targets in test_loader:
                         for inputs, targets, _ in test_loader:
                             inputs, targets = inputs.to(self.net.device), targets.to(self.net.device)
