@@ -501,6 +501,12 @@ class ProtoDC(ContinualModel):
 
             # Backward pass and optimization step
             total_loss.backward()
+            optimizer_img.step()
+
+            # Optional: Add some constraints to keep synthetic images realistic
+            with torch.no_grad():
+                syn_img.clamp_(-2.0, 2.025)  # Adjust range based on your data normalization
+
             with torch.no_grad():
                 grad_norm = syn_img.grad.norm().item()
                 img_norm = syn_img.norm().item()
@@ -510,11 +516,6 @@ class ProtoDC(ContinualModel):
                 img_min = syn_img.min().item()
                 print(f"[Class {class_id}] Gradient norm: {grad_norm:.6f} | Exemplar norm: {img_norm:.6f} "
                       f"| mean: {img_mean:.6f} | std: : {img_std:.6f} | min-max: {img_min:.6f}:{img_max:.6f}")
-            optimizer_img.step()
-
-            # Optional: Add some constraints to keep synthetic images realistic
-            # with torch.no_grad():
-            #     syn_img.clamp_(-2.0, 2.025)  # Adjust range based on your data normalization
 
             tmp_image_syn.append(syn_img)
 
@@ -825,64 +826,64 @@ class ProtoDC(ContinualModel):
             else:
                 # 1. Extract embeddings + labels from full dataset
                 all_features, all_labels = [], []
-                # with torch.no_grad():
-                #     # for k, test_loader in enumerate(dataset.test_loaders):
-                #     for k, test_loader in enumerate([dataset.train_loader]):
-                #         # for inputs, targets in test_loader:
-                #         for inputs, targets, _ in test_loader:
-                #             inputs, targets = inputs.to(self.net.device), targets.to(self.net.device)
-                #             _, feats = self.net(inputs, returnt = 'both')
-                #             all_features.append(feats.cpu())
-                #             all_labels.append(targets.cpu())
-                #
-                # all_features = torch.cat(all_features, dim=0)
-                # all_labels = torch.cat(all_labels, dim=0)
-                #
-                # syn_protos = []
-                # prototypes = []
-                # predictions = []
-                # num_classes = len(self.seen_classes)
-                # for class_id in self.seen_classes:
-                #     class_mask = (all_labels == class_id)
-                #     class_features = all_features[class_mask]
-                #
-                #     if len(class_features) > 0:
-                #         proto = class_features.mean(dim=0)  # centroid of features
-                #         print(f"Difference train-test proto {class_id}: {torch.norm(self.class_prototypes[class_id].cpu() - proto)}")
-                #         prototypes.append(proto)
-                #         predictions_onehot = torch.nn.functional.one_hot(torch.tensor(class_id), num_classes=num_classes).float()
-                #         predictions.append(predictions_onehot)
-                #     else:
-                #         # if no samples of this class are present
-                #         prototypes.append(torch.zeros(all_features.size(1)))
-                #         predictions_onehot = torch.nn.functional.one_hot(torch.tensor(class_id), num_classes=num_classes).float()
-                #         predictions.append(predictions_onehot)
-                #
-                #     if class_id in self.buf_syn_img:
-                #         if self.buf_syn_img[class_id] is not None:
-                #             _, feats = self.net(self.buf_syn_img[class_id], returnt='both')
-                #             syn_protos.append(feats.squeeze(0).cpu())
-                #         else:
-                #             syn_protos.append(torch.zeros(self.spc, all_features.size(1)))
-                #     else:
-                #         syn_protos.append(torch.zeros(self.spc, all_features.size(1)))
-                #
-                # prototypes = torch.stack(prototypes, dim=0)  # [num_classes, D]
-                # predictions = torch.stack(predictions, dim=0)
-                # syn_protos = torch.stack(syn_protos, dim=0)  # [num_classes, D]
-                #
-                # # 3. Visualize with your method
-                # fig = self.visualizer.visualize_episode(
-                #     embeddings=all_features,
-                #     labels=all_labels,
-                #     task=self._current_task,
-                #     epoch=epoch,
-                #     prototypes=prototypes,
-                #     predictions=predictions,
-                #     syn_proto = syn_protos,
-                #     method="tsne",  # or "pca" or "tsne"
-                #     title=f"t-SNE of t{self._current_task}e{epoch}"
-                # )
+                with torch.no_grad():
+                    # for k, test_loader in enumerate(dataset.test_loaders):
+                    for k, test_loader in enumerate([dataset.train_loader]):
+                        # for inputs, targets in test_loader:
+                        for inputs, targets, _ in test_loader:
+                            inputs, targets = inputs.to(self.net.device), targets.to(self.net.device)
+                            _, feats = self.net(inputs, returnt = 'both')
+                            all_features.append(feats.cpu())
+                            all_labels.append(targets.cpu())
+
+                all_features = torch.cat(all_features, dim=0)
+                all_labels = torch.cat(all_labels, dim=0)
+
+                syn_protos = []
+                prototypes = []
+                predictions = []
+                num_classes = len(self.seen_classes)
+                for class_id in self.seen_classes:
+                    class_mask = (all_labels == class_id)
+                    class_features = all_features[class_mask]
+
+                    if len(class_features) > 0:
+                        proto = class_features.mean(dim=0)  # centroid of features
+                        print(f"Difference train-test proto {class_id}: {torch.norm(self.class_prototypes[class_id].cpu() - proto)}")
+                        prototypes.append(proto)
+                        predictions_onehot = torch.nn.functional.one_hot(torch.tensor(class_id), num_classes=num_classes).float()
+                        predictions.append(predictions_onehot)
+                    else:
+                        # if no samples of this class are present
+                        prototypes.append(torch.zeros(all_features.size(1)))
+                        predictions_onehot = torch.nn.functional.one_hot(torch.tensor(class_id), num_classes=num_classes).float()
+                        predictions.append(predictions_onehot)
+
+                    if class_id in self.buf_syn_img:
+                        if self.buf_syn_img[class_id] is not None:
+                            _, feats = self.net(self.buf_syn_img[class_id], returnt='both')
+                            syn_protos.append(feats.squeeze(0).cpu())
+                        else:
+                            syn_protos.append(torch.zeros(self.spc, all_features.size(1)))
+                    else:
+                        syn_protos.append(torch.zeros(self.spc, all_features.size(1)))
+
+                prototypes = torch.stack(prototypes, dim=0)  # [num_classes, D]
+                predictions = torch.stack(predictions, dim=0)
+                syn_protos = torch.stack(syn_protos, dim=0)  # [num_classes, D]
+
+                # 3. Visualize with your method
+                fig = self.visualizer.visualize_episode(
+                    embeddings=all_features,
+                    labels=all_labels,
+                    task=self._current_task,
+                    epoch=epoch,
+                    prototypes=prototypes,
+                    predictions=predictions,
+                    syn_proto = syn_protos,
+                    method="tsne",  # or "pca" or "tsne"
+                    title=f"t-SNE of t{self._current_task}e{epoch}"
+                )
                 # fig = self.visualizer.visualize_episode(
                 #     embeddings=all_features,
                 #     labels=all_labels,
