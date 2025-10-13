@@ -17,6 +17,8 @@ from utils.args import add_rehearsal_args, ArgumentParser
 from utils.buffer import Buffer
 
 import os
+from models.protocore_utils.optimizers import get_opt
+
 
 class ProtoDC2(ContinualModel):
     """Continual learning via Prototype Set Condensation."""
@@ -91,6 +93,9 @@ class ProtoDC2(ContinualModel):
         # TODO Initialize learning epochs/iters for model / synthetic data
         self.n_epoch_model = 100   # self.args.n_epochs // 2
         self.n_epoch_data = self.args.n_epochs - self.n_epoch_model
+
+        # TODO Parameters for VQGAN:
+        self.gumbel = False
 
         if not hasattr(self, "best_loss"):
             print("Best Loss Init")
@@ -429,124 +434,6 @@ class ProtoDC2(ContinualModel):
 
         # print(f"image_syn: {self.image_syn}")
 
-
-    def optimize_proto_exemplar(self, epoch, image_syn, label_syn,
-                                inputs = None, labels = None,
-                                target_features=None):
-        """
-        Optimize synthetic prototypes to match target features.
-
-        This function optimizes each synthetic exemplar image_syn[i] to produce features
-        that match the stored prototype for class i.
-
-        Args:
-            image_syn: List of synthetic images [image_syn[0], image_syn[1], ..., image_syn[num_classes-1]]
-                       where image_syn[i] is the synthetic exemplar for class i
-            label_syn: List of labels [0, 1, 2, ..., num_classes-1]
-            target_features: Optional target features (not used in this implementation)
-        """
-        if not image_syn:
-            return
-
-        # Freeze self.net
-        for p in self.net.parameters():
-            p.requires_grad_(False)
-
-        print(f"Optimize Exemplar")
-        tmp_image_syn = []
-        criterion_proto_align = nn.MSELoss()
-        # Optimize each synthetic exemplar individually
-        for i, (syn_img, syn_label) in enumerate(zip(image_syn, label_syn)):
-            class_id = syn_label.item()
-            syn_label = syn_label.repeat(syn_img.size(0))
-
-            # Skip if we haven't seen this class yet (no prototype to align to)
-            if class_id not in self.class_prototypes:
-                print(class_id)
-                continue
-
-            # Create optimizer for this specific synthetic image
-            optimizer_img = Adam([syn_img], lr=self.args.lr_img)
-
-            # target_proto = self.class_prototypes[class_id]
-            # FIXME inputs -> rep. -> target_proto
-            outputs, features = self.net(inputs, returnt = 'both')
-            cls_support = features[(labels == class_id)]
-            target_proto = cls_support.mean(0)
-
-            # Optimize this synthetic exemplar over single step
-            optimizer_img.zero_grad()
-            total_loss = 0
-
-            # Forward pass: get features from synthetic image
-            # syn_img has shape (1, C, H, W) - single exemplar image
-            # syn_features = self.extract_features(syn_img)
-            syn_outputs, syn_features = self.net(syn_img, returnt='both')
-
-            # syn_features has shape (1, feature_dim) - features from the single exemplar
-            # The exemplar itself IS the prototype, so we squeeze the batch dimension
-            syn_proto = syn_features.mean(0)  # Remove batch dimension: (feature_dim,)
-
-            # Ensure target prototype has same shape
-            if target_proto.dim() != syn_proto.dim():
-                if target_proto.dim() > 1:
-                    target_proto = target_proto.view(-1)
-                if syn_proto.dim() > 1:
-                    syn_proto = syn_proto.view(-1)
-
-            # TODO Align synthetic prototype with stored / target prototype
-            align_loss = criterion_proto_align(syn_proto, target_proto)
-            ce_loss = self.loss(syn_outputs, syn_label)
-            # keep_loss = criterion_proto_align(syn_proto_1, buff_proto)
-            total_loss = (1 - self.args.p_alpha) * align_loss + self.args.p_alpha * ce_loss
-
-            # Backward pass and optimization step
-            total_loss.backward()
-            optimizer_img.step()
-
-            # Optional: Add some constraints to keep synthetic images realistic
-            with torch.no_grad():
-                syn_img.clamp_(-2.0, 2.025)  # Adjust range based on your data normalization
-
-            with torch.no_grad():
-                grad_norm = syn_img.grad.norm().item()
-                img_norm = syn_img.norm().item()
-                img_mean = syn_img.mean().item()
-                img_std = syn_img.std().item()
-                img_max = syn_img.max().item()
-                img_min = syn_img.min().item()
-                print(f"[Class {class_id}] Gradient norm: {grad_norm:.6f} | Exemplar norm: {img_norm:.6f} "
-                      f"| mean: {img_mean:.6f} | std: : {img_std:.6f} | min-max: {img_min:.6f}:{img_max:.6f}")
-
-            tmp_image_syn.append(syn_img)
-
-        print(f"Proto: 1) total: {total_loss.item()} | align: {align_loss} | ce: {ce_loss}")
-
-        # Update buffer with optimized synthetic exemplars
-        self._add_synthetic_to_buffer(tmp_image_syn, label_syn)
-
-        # Unfreeze self.net
-        for p in self.net.parameters():
-            p.requires_grad_(True)
-
-    def _add_synthetic_to_buffer(self, image_syn, label_syn):
-        """
-        Add optimized synthetic exemplars to the buffer.
-
-        Args:
-            image_syn: List of optimized synthetic images
-            label_syn: Corresponding labels
-        """
-        with torch.no_grad():
-            for syn_img, syn_label in zip(image_syn, label_syn):
-                # print(f"==== storing ====")
-                class_id = syn_label.item()
-                # FIXME Add synthetic exemplar to buffer
-                # FIXME buffer size 1xCxHxW
-                self.buf_syn_img[class_id] = syn_img.to(self.device)
-                self.buf_labels[class_id] = syn_label.to(self.device)
-
-
     def compute_buffer_alignment_loss(self, current_features, current_labels):
         """
         Compute alignment loss between current and buffered prototypes.
@@ -674,10 +561,178 @@ class ProtoDC2(ContinualModel):
         # FIXME the buffer should only save 1 data according to each class.
 
         1. Generate synthetic exemplars
-        2. Load VQGAN
+        2. Load VQGAN --> self.img_decoder
         3. [Loop syn_epoch] Train synthetic exemplars
         """
+        # TODO Initialization
         self.img_decoder = load_vqgan_model(args.vqgan_config, args.vqgan_checkpoint).to(device)
+
+        # Cutout class options:
+        f = 2 ** (model.decoder.num_resolutions - 1)
+        self.toksX, self.toksY = args.size[0] // f, args.size[1] // f
+        self.sideX, self.sideY = self.toksX * f, self.toksY * f
+
+        if gumbel:
+            self.e_dim = 256
+            self.n_toks = self.img_decoder.quantize.n_embed
+            self.z_min = self.img_decoder.quantize.embed.weight.min(dim=0).values[None, :, None, None]
+            self.z_max = self.img_decoder.quantize.embed.weight.max(dim=0).values[None, :, None, None]
+        else:
+            self.e_dim = self.img_decoder.quantize.e_dim
+            self.n_toks = self.img_decoder.quantize.n_e
+            self.z_min = self.img_decoder.quantize.embedding.weight.min(dim=0).values[None, :, None, None]
+            self.z_max = self.img_decoder.quantize.embedding.weight.max(dim=0).values[None, :, None, None]
+
+        normalize = transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
+                                         std=[0.26862954, 0.26130258, 0.27577711])
+        """
+        - embeddings [SxBx(CxHxW)]: loop over S categories.
+        - self.n_toks: 
+        - self.toksX:
+        - self.toksY: 
+        - self.e_dim: 
+        """
+        for index, (cls, embed) in enumerate(embeddings.items()):
+            cls_id = index
+            # mask for z via (one_hot @ z_pre)
+            one_hot = F.one_hot(torch.randint(self.n_toks, [self.args.batch, self.toksY * self.toksX],
+                                              device=self.device), self.n_toks).float()
+            if self.gumbel:
+                z = one_hot @ self.img_decoder.quantize.embed.weight
+            else:
+                z = one_hot @ self.img_decoder.quantize.embedding.weight
+            z = z.view([-1, self.toksY, self.toksX, self.e_dim]).permute(0, 3, 1, 2)
+
+            z_orig = z.clone()
+            z.requires_grad_(True)
+
+            # Set the optimiser
+            opt, z = get_opt(args.optimiser, z, args.step_size)
+
+            i = 0  # Iteration counter
+            with tqdm() as pbar:
+                while i < args.max_iterations:
+                    self.optimize_proto_exemplar(i, cls_id)
+                    i += 1
+                    pbar.update()
+
+            print("done")
+
+    def optimize_proto_exemplar(self, epoch, image_syn, label_syn,
+                                inputs = None, labels = None,
+                                target_features=None):
+        """
+        Optimize synthetic prototypes to match target features.
+
+        This function optimizes each synthetic exemplar image_syn[i] to produce features
+        that match the stored prototype for class i.
+
+        Args:
+            image_syn: List of synthetic images [image_syn[0], image_syn[1], ..., image_syn[num_classes-1]]
+                       where image_syn[i] is the synthetic exemplar for class i
+            label_syn: List of labels [0, 1, 2, ..., num_classes-1]
+            target_features: Optional target features (not used in this implementation)
+        """
+        if not image_syn:
+            return
+
+        # Freeze self.net
+        for p in self.net.parameters():
+            p.requires_grad_(False)
+
+        print(f"Optimize Exemplar")
+        tmp_image_syn = []
+        criterion_proto_align = nn.MSELoss()
+        # Optimize each synthetic exemplar individually
+        for i, (syn_img, syn_label) in enumerate(zip(image_syn, label_syn)):
+            class_id = syn_label.item()
+            syn_label = syn_label.repeat(syn_img.size(0))
+
+            # Skip if we haven't seen this class yet (no prototype to align to)
+            if class_id not in self.class_prototypes:
+                print(class_id)
+                continue
+
+            # Create optimizer for this specific synthetic image
+            optimizer_img = Adam([syn_img], lr=self.args.lr_img)
+
+            # target_proto = self.class_prototypes[class_id]
+            # FIXME inputs -> rep. -> target_proto
+            outputs, features = self.net(inputs, returnt = 'both')
+            cls_support = features[(labels == class_id)]
+            target_proto = cls_support.mean(0)
+
+            # Optimize this synthetic exemplar over single step
+            optimizer_img.zero_grad()
+            total_loss = 0
+
+            # Forward pass: get features from synthetic image
+            # syn_img has shape (1, C, H, W) - single exemplar image
+            # syn_features = self.extract_features(syn_img)
+            syn_outputs, syn_features = self.net(syn_img, returnt='both')
+
+            # syn_features has shape (1, feature_dim) - features from the single exemplar
+            # The exemplar itself IS the prototype, so we squeeze the batch dimension
+            syn_proto = syn_features.mean(0)  # Remove batch dimension: (feature_dim,)
+
+            # Ensure target prototype has same shape
+            if target_proto.dim() != syn_proto.dim():
+                if target_proto.dim() > 1:
+                    target_proto = target_proto.view(-1)
+                if syn_proto.dim() > 1:
+                    syn_proto = syn_proto.view(-1)
+
+            # TODO Align synthetic prototype with stored / target prototype
+            align_loss = criterion_proto_align(syn_proto, target_proto)
+            ce_loss = self.loss(syn_outputs, syn_label)
+            # keep_loss = criterion_proto_align(syn_proto_1, buff_proto)
+            total_loss = (1 - self.args.p_alpha) * align_loss + self.args.p_alpha * ce_loss
+
+            # Backward pass and optimization step
+            total_loss.backward()
+            optimizer_img.step()
+
+            # Optional: Add some constraints to keep synthetic images realistic
+            with torch.no_grad():
+                syn_img.clamp_(-2.0, 2.025)  # Adjust range based on your data normalization
+
+            with torch.no_grad():
+                grad_norm = syn_img.grad.norm().item()
+                img_norm = syn_img.norm().item()
+                img_mean = syn_img.mean().item()
+                img_std = syn_img.std().item()
+                img_max = syn_img.max().item()
+                img_min = syn_img.min().item()
+                print(f"[Class {class_id}] Gradient norm: {grad_norm:.6f} | Exemplar norm: {img_norm:.6f} "
+                      f"| mean: {img_mean:.6f} | std: : {img_std:.6f} | min-max: {img_min:.6f}:{img_max:.6f}")
+
+            tmp_image_syn.append(syn_img)
+
+        print(f"Proto: 1) total: {total_loss.item()} | align: {align_loss} | ce: {ce_loss}")
+
+        # Update buffer with optimized synthetic exemplars
+        self._add_synthetic_to_buffer(tmp_image_syn, label_syn)
+
+        # Unfreeze self.net
+        for p in self.net.parameters():
+            p.requires_grad_(True)
+
+    def _add_synthetic_to_buffer(self, image_syn, label_syn):
+        """
+        Add optimized synthetic exemplars to the buffer.
+
+        Args:
+            image_syn: List of optimized synthetic images
+            label_syn: Corresponding labels
+        """
+        with torch.no_grad():
+            for syn_img, syn_label in zip(image_syn, label_syn):
+                # print(f"==== storing ====")
+                class_id = syn_label.item()
+                # FIXME Add synthetic exemplar to buffer
+                # FIXME buffer size 1xCxHxW
+                self.buf_syn_img[class_id] = syn_img.to(self.device)
+                self.buf_labels[class_id] = syn_label.to(self.device)
 
     def end_epoch(self, epoch: int, dataset: 'ContinualDataset') -> None:
         """
