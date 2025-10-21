@@ -34,7 +34,7 @@ CSREL_CLASS_BALANCE=${15:-"true"}
 # Additional parameters
 BACKBONE=${16:-"resnet18"}
 VALIDATION=${17:-0}
-SAVECHECK=${18:-"true"}
+SAVECHECK=${18:-"false"}
 NOWAND=${19:-1}
 
 echo "Configuration:"
@@ -58,21 +58,6 @@ echo "  Class balance: $CSREL_CLASS_BALANCE"
 echo "  Backbone: $BACKBONE"
 echo "====================================================="
 
-# Validate dataset
-case $DATASET in
-    "seq-cifar10"|"seq-cifar100"|"seq-cifar10-224"|"seq-cifar100-224")
-        echo "✅ Valid CIFAR dataset: $DATASET"
-        ;;
-    *)
-        echo "❌ Invalid dataset: $DATASET"
-        echo "Available CIFAR datasets:"
-        echo "  - seq-cifar10 (Sequential CIFAR-10, 5 tasks, 2 classes each)"
-        echo "  - seq-cifar100 (Sequential CIFAR-100, 10 tasks, 10 classes each)"
-        echo "  - seq-cifar10-224 (CIFAR-10 resized to 224x224 for ViT)"
-        echo "  - seq-cifar100-224 (CIFAR-100 resized to 224x224 for ViT)"
-        exit 1
-        ;;
-esac
 
 # Validate device
 if [[ $DEVICE == cuda* ]]; then
@@ -113,8 +98,6 @@ CMD="python3.11 main.py \
     --seed $SEED \
     --backbone $BACKBONE \
     --validation $VALIDATION \
-    --savecheck $SAVECHECK \
-    --nowand $NOWAND \
     --csrel_ref_epochs $REF_EPOCHS \
     --csrel_ref_lr $REF_LR \
     --csrel_ce_factor $CSREL_CE_FACTOR \
