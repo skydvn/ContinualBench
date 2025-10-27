@@ -85,6 +85,7 @@ class CSReL(ContinualModel):
         self.task_cnts = []        # Task sample counts for buffer management
         self._dimension_fix_applied = False  # Track if dimension fix has been applied
         self.chunk_size = getattr(args, 'csrel_chunk_size', 1000)  # Chunk size for processing
+        self.task_sample_hashes = set()  # Track unique samples to avoid duplicates
         
         # Selection agent parameters
         self.model_params = {
@@ -219,27 +220,42 @@ class CSReL(ContinualModel):
         return loss.item()
 
     def _store_task_samples(self, inputs, labels):
-        """Store samples from current task using memory-efficient file-based storage."""
+        """Store samples from current task using memory-efficient file-based storage (avoid duplicates)."""
         if self.current_task not in self.task_data_files:
             # Create temporary file for this task
             temp_file = os.path.join(self.buffer_path, f'task_{self.current_task}_data.pkl')
             self.task_data_files[self.current_task] = temp_file
             
-            # Initialize file
+            # Initialize file and set for tracking unique samples
             with open(temp_file, 'wb') as f:
                 pass  # Create empty file
-        
-        # Append data to file (chunked writing for memory efficiency)
-        with open(self.task_data_files[self.current_task], 'ab') as f:
-            # Convert to numpy for efficient storage
-            inputs_np = inputs.cpu().numpy()
-            labels_np = labels.cpu().numpy()
             
-            # Store in chunks to avoid memory spikes
-            for i in range(0, len(inputs_np), self.chunk_size):
-                chunk_inputs = inputs_np[i:i+self.chunk_size]
-                chunk_labels = labels_np[i:i+self.chunk_size]
-                pickle.dump((chunk_inputs, chunk_labels), f)
+            # Initialize set to track unique samples (using hash of data)
+            self.task_sample_hashes = set()
+        
+        # Convert to numpy for efficient storage
+        inputs_np = inputs.cpu().numpy()
+        labels_np = labels.cpu().numpy()
+        
+        # Check for duplicates using hash of data
+        new_samples = []
+        for i in range(len(inputs_np)):
+            # Create hash of the sample data
+            sample_hash = hash((inputs_np[i].tobytes(), labels_np[i]))
+            
+            if sample_hash not in self.task_sample_hashes:
+                self.task_sample_hashes.add(sample_hash)
+                new_samples.append((inputs_np[i], labels_np[i]))
+        
+        # Only store new samples
+        if new_samples:
+            with open(self.task_data_files[self.current_task], 'ab') as f:
+                # Store in chunks to avoid memory spikes
+                for i in range(0, len(new_samples), self.chunk_size):
+                    chunk_samples = new_samples[i:i+self.chunk_size]
+                    chunk_inputs = np.array([s[0] for s in chunk_samples])
+                    chunk_labels = np.array([s[1] for s in chunk_samples])
+                    pickle.dump((chunk_inputs, chunk_labels), f)
 
     def _load_task_samples_efficient(self, task_id):
         """Load task samples from file (memory-efficient)."""
@@ -475,14 +491,30 @@ class CSReL(ContinualModel):
         for epoch in range(self.ref_epochs):
             
             epoch_loss = 0.0
-            for batch_idx, (sps, labs) in enumerate(train_loader):
+            for batch_idx, data in enumerate(train_loader):
+                # Handle different data formats
+                if len(data) == 4:
+                    d_ids, sps, labs, logit = data
+                elif len(data) == 3:
+                    d_ids, sps, labs = data
+                    logit = None
+                elif len(data) == 2:
+                    sps, labs = data
+                    logit = None
+                else:
+                    raise ValueError(f"Unexpected data format with {len(data)} elements")
+                
                 # Ensure all tensors are on the same device as the model
                 device = next(ref_model.parameters()).device
                 sps = sps.to(device)
                 labs = labs.to(device)
+                
+                # Fix tensor shape if needed (remove extra dimensions)
                 if len(sps.shape) == 5:  # [batch, 1, channels, height, width]
                     sps = sps.squeeze(1)
-               
+                elif len(sps.shape) == 6:  # [batch, 1, 1, channels, height, width]
+                    sps = sps.squeeze(1).squeeze(1)
+                
                 optimizer.zero_grad()
                 outputs = ref_model(sps)
                 loss = criterion(outputs, labs)
@@ -571,7 +603,9 @@ class CSReL(ContinualModel):
         
         # Initialize iterative selection (CSReL-Coreset-CL style)
         all_selected_ids = set()
-        incremental_size = max(1, remaining_slots // self.selection_steps) if self.selection_steps > 1 else remaining_slots
+        # Set reasonable incremental size - at least 10 samples per iteration
+        incremental_size = max(10, remaining_slots // self.selection_steps) if self.selection_steps > 1 else remaining_slots
+        print(f"Debug: selection_steps={self.selection_steps}, remaining_slots={remaining_slots}, incremental_size={incremental_size}")
         
         # Create class distribution for balanced selection
         class_ids = {}
@@ -864,6 +898,8 @@ class CSReL(ContinualModel):
     def begin_task(self, dataset):
         """Initialize task-specific variables."""
         super().begin_task(dataset)
+        # Reset sample hashes for new task to avoid duplicates
+        self.task_sample_hashes = set()
         # Task samples will be collected during observe()
 
     def end_task(self, dataset):
