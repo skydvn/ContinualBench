@@ -121,7 +121,7 @@ class ContinualModel(nn.Module):
         if hasattr(self, '_n_classes_current_task'):
             return self._n_classes_current_task
         else:
-            return -1
+            return ContinualModel
 
     @property
     def n_seen_classes(self):
@@ -340,7 +340,7 @@ class ContinualModel(nn.Module):
         Takes care of dropping updating some counters.
         """
         self._epoch_iteration = 0
-        self.end_epoch(epoch, dataset)
+        self.begin_epoch(epoch, dataset)
 
     def meta_end_epoch(self, epoch: int, dataset: 'ContinualDataset') -> None:
         """
@@ -351,13 +351,6 @@ class ContinualModel(nn.Module):
     def begin_epoch(self, epoch: int, dataset: 'ContinualDataset') -> None:
         """
         Prepares the model for the current epoch.
-        """
-        pass
-
-    def end_task(self, dataset: 'ContinualDataset') -> None:
-        """
-        Prepares the model for the next task.
-        Executed after each task.
         """
         pass
 

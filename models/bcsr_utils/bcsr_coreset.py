@@ -5,20 +5,20 @@ from .bcsr_training import Training
 
 class BCSR_Coreset:
     """"
-    Coreset selection basede on bilevel optimzation
+    Coreset selection based on bilevel optimzation
 
     Args:
         proxy_model: model for coreset selection
         lr_proxy_model: learning rare for proxy_model
         beta: balance the loss and regularizer
         out_dim: input dimension
-        max_outer_it: outer loops for bilevel optimizaiton
-        max_inner_it: inner loops for bilevel optimizaiton
-        weight_lr: step size for updating samlple weights
+        max_outer_it: outer loops for bilevel optimization
+        max_inner_it: inner loops for bilevel optimization
+        weight_lr: step size for updating sample weights
         candidate_batch_size: number of coreset candidates
     """
-    def __init__(self, proxy_model, lr_proxy_model,  beta, out_dim=10, max_outer_it=50, max_inner_it=1, weight_lr=1e-1,
-                candidate_batch_size=600, logging_period=1000, device='cuda'):
+    def __init__(self, proxy_model, lr_proxy_model,  beta, out_dim=10, max_outer_it=50, max_inner_it=1,
+                 weight_lr=1e-1, candidate_batch_size=600, logging_period=1000, device='cuda'):
         self.out_dim = out_dim
         self.device = device
         self.max_outer_it = max_outer_it
@@ -85,7 +85,8 @@ class BCSR_Coreset:
             for i in range(self.max_outer_it):
                 #print(f"Outer iteration {i+1}/{self.max_outer_it}")
                 inner_loss = self.training_model_op.train_inner(X, y, task_id, coreset_weights, self.max_inner_it)
-                coreset_weights, _, outer_loss = self.training_model_op.train_outer(X, y, task_id, coreset_weights, topk, ref_x, ref_y)
+                coreset_weights, _, outer_loss = self.training_model_op.train_outer(X, y, task_id, coreset_weights,
+                                                                                    topk, ref_x, ref_y)
                 coreset_weights = self.projection_onto_simplex(coreset_weights)
                 total_loss = torch.mean(outer_loss).item()
                 if i%10 == 0:

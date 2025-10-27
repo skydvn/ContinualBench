@@ -15,7 +15,7 @@ import logging
 import torch
 from tqdm.auto import tqdm
 from datasets import get_dataset
-from datasets.utils.continual_dataset import ContinualDataset, MammothDatasetWrapper
+from datasets.utils.continual_dataset import ContinualDataset, MammothDatasetWrapper, reshuffle_dataloader
 from datasets.utils.gcl_dataset import GCLDataset
 from models.utils.continual_model import ContinualModel
 from models.utils.future_model import FutureModel
@@ -42,6 +42,8 @@ def initialize_wandb(args: Namespace) -> None:
     """
     assert wandb is not None, "Wandb not installed, please install it or run without wandb"
 
+
+    print("=============== INIT WANDB ===============")
     run_name = args.wandb_name if args.wandb_name is not None else args.model
 
     run_id = args.conf_jobnum.split('-')[0]
@@ -80,6 +82,7 @@ def train_single_epoch(model: ContinualModel,
         the number of iterations performed in the current epoch
     """
     global GLOBALS
+    train_loader = reshuffle_dataloader(train_loader, args.batch_size)
     train_iter = iter(train_loader)
     i = 0
 
@@ -148,7 +151,6 @@ def train(model: ContinualModel, dataset: ContinualDataset,
     can_compute_fwd_beforetask = True
     random_results_class, random_results_task = [], []
 
-    args.nowand = True
     if not args.nowand:
         initialize_wandb(args)
 

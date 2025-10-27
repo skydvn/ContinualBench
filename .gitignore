@@ -96,6 +96,7 @@ logs
 _autosummary
 generated
 val_permutations
+tsne/
 
 # Other prepare grid scripts except the example one
 scripts/prepare_grid*
