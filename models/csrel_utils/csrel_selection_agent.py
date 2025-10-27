@@ -141,9 +141,12 @@ class CSReLSelectionAgent:
                             img = self.transforms(img_pil)
                         else:
                             img = self.transforms(img)
-
+                
+                # Ensure final tensor is 3D (C, H, W) - no batch dimension
                 if img.dim() == 4:
                     img = img.squeeze(0)  # Remove batch dimension
+                elif img.dim() == 2:
+                    img = img.unsqueeze(0)  # Add channel dimension
                 
                 return img, self.labels[idx]
         
@@ -267,17 +270,58 @@ class CSReLSelectionAgent:
         loss_dic = {}
         
         with torch.no_grad():
-            for batch_idx, (sps, labs) in enumerate(data_loader):
-                if use_cuda:
-                    sps = sps.cuda()
-                    labs = labs.cuda()
-                
-                outputs = ref_model(sps)
-                losses = loss_fn(outputs, labs)
-                
-                for i, loss in enumerate(losses):
-                    sample_id = batch_idx * data_loader.batch_size + i
-                    loss_dic[sample_id] = loss.item()
+            for i in range(aug_iters):
+                for batch_idx, data in enumerate(data_loader):
+                    print(f"Debug: Batch {batch_idx}, data type: {type(data)}, data length: {len(data) if hasattr(data, '__len__') else 'no length'}")
+                    # Handle different data formats - be more flexible
+                    try:
+                        if len(data) == 4:
+                            d_ids, sps, labs, logit = data
+                        elif len(data) == 3:
+                            d_ids, sps, labs = data
+                            logit = None
+                        elif len(data) == 2:
+                            # Handle case where only (sps, labs) are returned
+                            sps, labs = data
+                            d_ids = torch.arange(len(sps))  # Create sequential IDs
+                            logit = None
+                        else:
+                            raise ValueError(f"Unexpected data format with {len(data)} elements")
+                    except Exception as e:
+                        print(f"Error unpacking data: {e}, data type: {type(data)}, data length: {len(data) if hasattr(data, '__len__') else 'no length'}")
+                        # Fallback: assume it's (sps, labs) format
+                        sps, labs = data
+                        d_ids = torch.arange(len(sps))
+                        logit = None
+                    
+                    if use_cuda:
+                        sps = sps.cuda()
+                        labs = labs.cuda()
+                        if logit is not None:
+                            logit = logit.cuda()
+                    # Fix tensor shape if needed (remove extra dimensions)
+                    if len(sps.shape) == 5:  # [batch, 1, channels, height, width]
+                        sps = sps.squeeze(1)  # Remove the extra dimension
+                    
+                    loss = loss_fn(ref_model(sps), labs, logit)
+                    if use_cuda:
+                        loss = loss.cpu()
+                    loss = loss.clone().detach().numpy()
+                    
+                    batch_size = sps.shape[0]
+                    for j in range(batch_size):
+                        d_id = int(d_ids[j].numpy())
+                        if d_id not in loss_dic:
+                            loss_dic[d_id] = [loss[j]]
+                        else:
+                            loss_dic[d_id].append(loss[j])
+        
+        # Average losses across augmentations
+        for d_id in loss_dic.keys():
+            loss_dic[d_id] = float(np.mean(loss_dic[d_id]))
+        
+        if use_cuda:
+            ref_model.cpu()
         
         return loss_dic
 
@@ -310,7 +354,7 @@ class CSReLSelectionAgent:
                 x=x,
                 y=y,
                 fname='temp_data.pkl',
-                batch_size=20,
+                batch_size=256,
                 id_list=id_list,
                 id2logit=id2logit
             )
@@ -394,6 +438,12 @@ class CSReLSelectionAgent:
                             img = self.transforms(img_pil)
                         else:
                             img = self.transforms(img)
+                
+                # Ensure final tensor is 3D (C, H, W) - no batch dimension
+                if img.dim() == 4:
+                    img = img.squeeze(0)  # Remove batch dimension
+                elif img.dim() == 2:
+                    img = img.unsqueeze(0)  # Add channel dimension
                 
                 return img, self.labels[idx]
         
@@ -497,7 +547,6 @@ class CSReLSelectionAgent:
         max_iterations = 10  # Prevent infinite loops
         
         while len(all_selected_ids) < select_size and iteration < max_iterations:
-            print("collect data ids len(all_selected_ids)/ select_size", len(all_selected_ids), select_size)
             iteration += 1
             
             id_pool = set()
@@ -559,7 +608,7 @@ class CSReLSelectionAgent:
             os.remove(self.cur_train_file)
         if full_data_file and os.path.exists(full_data_file):
             os.remove(full_data_file)
-
+        
         # Return the actual selected data, not just IDs
         selected_data_list = []
         for d_id in all_selected_ids:
@@ -568,9 +617,8 @@ class CSReLSelectionAgent:
                 if di[0] == d_id:
                     selected_data_list.append(di)
                     break
+        print(f"Selected {len(selected_data_list)} data out of {select_size}")
         return selected_data_list
-        
-        #return list(all_selected_ids)
 
     def dump_selected_ids(self, selected_ids: set):
         """Dump selected IDs to file."""
