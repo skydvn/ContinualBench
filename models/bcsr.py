@@ -169,12 +169,21 @@ class Bcsr(ContinualModel):
             memory_size=remaining,
             is_shuffle=True
         )
+        try:
+            print(f"[BCSR] Task {self.current_task}: selected {len(selected)} candidate indices (remaining capacity {remaining})")
+        except Exception:
+            pass
 
         # 7) Add to buffer
         sel_x = X_sel[selected].to(self.device)
         sel_y = Y_sel[selected].to(self.device)
         if sel_x.shape[0] > 0:
             self.buffer.add_data(examples=sel_x, labels=sel_y)
+            try:
+                print(f"[BCSR] Task {self.current_task}: added {sel_x.shape[0]} samples to buffer; buffer size is now {len(self.buffer)}")
+            except Exception:
+                pass
+            
 
 
 

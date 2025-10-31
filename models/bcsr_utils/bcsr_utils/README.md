@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=0 python3.11 main.py --model bcsr --dataset seq-cifar100 --lr 0.1 --buffer_size 200   --bcsr_lr_proxy 0.01 --bcsr_beta 1.0 --bcsr_outer_it 50 --bcsr_inner_it 1   --bcsr_weight_lr 0.1 --bcsr_candidate_bs 600 --optimizer sgd --n_epochs 30 --batch_size 256
