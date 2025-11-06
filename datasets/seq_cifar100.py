@@ -87,7 +87,7 @@ class SequentialCIFAR100(ContinualDataset):
     NAME = 'seq-cifar100'
     SETTING = 'class-il'
     N_CLASSES_PER_TASK = 2
-    N_TASKS = 50
+    N_TASKS = 10
     N_CLASSES = N_CLASSES_PER_TASK * N_TASKS
     SIZE = (32, 32)
     MEAN, STD = (0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)
